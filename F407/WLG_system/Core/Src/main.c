@@ -77,65 +77,70 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 
 
+/*
+ * º¯Êý: Processcommand
+ * ¹¦ÄÜ: ´Ó USART1 ½ÓÊÕ FIFO ÖÐ¶ÁÈ¡ÉÏÎ»»úÃüÁî, ÒÔ @ ×÷ÎªÒ»Ö¡ÃüÁî½áÊø·û¡£
+ * ·Ö·¢: D0 ÎÂ¿Ø, D1 Êý¾Ý/TF, D2 ËÄÂ·¹àÁ÷µç»ú, D3 CO2 Ä£¿é¡£
+ */
 void Processcommand(void)
 {
     static char cmd_buf[CMD_BUFFER_SIZE];
     static uint16_t cmd_len = 0;
-
     uint8_t byte;
+
     while (!fifo_s_is_empty(&uart1_rx_fifo))
     {
         fifo_s_get(&uart1_rx_fifo, &byte);
+
+        /* ·ÀÖ¹ÃüÁî¹ý³¤µ¼ÖÂ»º³åÇøÒç³ö¡£ */
         if (cmd_len >= (sizeof(cmd_buf) - 1U))
         {
             cmd_len = 0;
         }
+
         cmd_buf[cmd_len++] = byte;
 
-        if (byte == '@') // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½???
+        if (byte == '@')
         {
-            cmd_buf[cmd_len] = '\0'; // ï¿½ï¿½ï¿½ï¿½ï¿½Ö·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+            cmd_buf[cmd_len] = '\0';
 
-            // ï¿½ï¿½ï¿½ï¿½Ö¡Í·ï¿½Ö·ï¿½ï¿½ï¿½ï¿½ï¿½
+            /* °´ D0/D1/D2/D3 Ç°×º·Ö·¢µ½¶ÔÓ¦Ä£¿é¡£ */
             if (strncmp((char*)cmd_buf, "D0", 2) == 0)
             {
-                // È¥ï¿½ï¿½Ç°ï¿½ï¿½Î» D0
+                /* D0: ÎÂ¿ØÄ£¿é¡£ */
                 memmove(cmd_buf, cmd_buf + 2, strlen((char*)cmd_buf + 2) + 1);
                 ProcessD0Command(cmd_buf);
             }
             // else if (strncmp((char*)cmd_buf, "D1", 2) == 0)
             // {
-            //     // È¥ï¿½ï¿½Ç°ï¿½ï¿½Î» D1
+            //     /* D1: TF Êý¾Ý¶ÁÐ´, Ä¿Ç°±£Áô¡£ */
             //     memmove(cmd_buf, cmd_buf + 2, strlen((char*)cmd_buf + 2) + 1);
             //     ProcessD1Command(cmd_buf);
             // }
             else if(strncmp((char*)cmd_buf, "D2", 2) == 0)
             {
-                // È¥ï¿½ï¿½Ç°ï¿½ï¿½Î» D2
+                /* D2: ËÄÂ·¹àÁ÷±Ã/²½½øµç»úÄ£¿é¡£ */
                 memmove(cmd_buf, cmd_buf + 2, strlen((char*)cmd_buf + 2) + 1);
                 ProcessD2Command(cmd_buf);
             }
             else if(strncmp((char*)cmd_buf, "D3", 2) == 0)
             {
-                // È¥ï¿½ï¿½Ç°ï¿½ï¿½Î» D3
+                /* D3: CO2 Ä£¿é¡£ */
                 memmove(cmd_buf, cmd_buf + 2, strlen((char*)cmd_buf + 2) + 1);
                 ProcessD3Command(cmd_buf);
             }
             else
             {
                 const char *result_code = "InvalidCommand\r\n";
-                fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code)); // ï¿½ï¿½ï¿½ë·¢ï¿½ï¿½FIFO
+                fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
                 send_data_from_tx_fifo();
             }
 
-            cmd_len = 0; // ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½
-        }
-
-        // ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½???
-        if (cmd_len >= (sizeof(cmd_buf) - 1U))
             cmd_len = 0;
+        }
     }
 }
+
 
 
 

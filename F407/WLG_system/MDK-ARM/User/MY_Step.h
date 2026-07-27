@@ -8,15 +8,10 @@
 #include <stdint.h>
 
 /*
- * D2 motor protocol after the leading "D2" is removed by Processcommand():
- *   dirN:0|1             N=1..4, set direction
- *   subN:8|16|32|64      set microstep subdivision
- *   freqN:Hz             set STEP pulse frequency, 1..60000 Hz
- *   startN / stopN       start or stop one motor
- *   startall / stopall   synchronized four-channel start or stop
- *
- * Legacy serial-assistant forms dir:1, sub:64, freq:9000, start:, stop:
- * are accepted as motor 1 commands.
+ * 文件: MY_Step.h
+ * 功能: 四路灌流步进电机接口声明。
+ * D2 命令格式: dirN:0/1@, subN:8/16/32/64@, freqN:Hz@, startN@, stopN@, startall@, stopall@。
+ * N 代表第 1..4 路灌流泵。
  */
 void StepperMotor_Init(void);
 void ProcessD2Command(char *command);

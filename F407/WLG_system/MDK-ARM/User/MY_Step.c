@@ -1,3 +1,10 @@
+/*
+ * 文件: MY_Step.c
+ * 功能: D2 灌流步进电机控制模块。
+ * 作用: 管理四路灌流泵的方向、细分、频率、启动和停止。
+ * 协议: 上位机发送 D2 命令, main.c 去掉 D2 前缀后传入 ProcessD2Command()。
+ * 示例: D2freq1:9000@, D2sub1:64@, D2startall@, D2stopall@。
+ */
 #include "MY_Step.h"
 
 #include <ctype.h>
@@ -17,27 +24,40 @@
 #define STEPPER_DEFAULT_SUB     64U
 #define STEPPER_DEFAULT_DIR     1U
 
+/*
+ * 单路步进电机运行参数。
+ * 每一路电机都使用同一个结构体, 便于后续增加标定曲线和流量换算。
+ */
 typedef struct
 {
-    TIM_HandleTypeDef *htim;
-    uint32_t channel;
-    GPIO_TypeDef *dir_port;
-    uint16_t dir_pin;
-    GPIO_TypeDef *ms1_port;
-    uint16_t ms1_pin;
-    GPIO_TypeDef *ms2_port;
-    uint16_t ms2_pin;
-    GPIO_TypeDef *en_port;
-    uint16_t en_pin;
-    uint32_t timer_clock_hz;
-    uint32_t frequency_hz;
-    uint8_t subdivision;
-    uint8_t direction;
-    uint8_t running;
+    TIM_HandleTypeDef *htim;      /* PWM 定时器句柄 */
+    uint32_t channel;             /* PWM 通道 */
+    GPIO_TypeDef *dir_port;       /* 方向 GPIO 端口 */
+    uint16_t dir_pin;             /* 方向 GPIO 引脚 */
+    GPIO_TypeDef *ms1_port;       /* 细分 MS1 GPIO 端口 */
+    uint16_t ms1_pin;             /* 细分 MS1 GPIO 引脚 */
+    GPIO_TypeDef *ms2_port;       /* 细分 MS2 GPIO 端口 */
+    uint16_t ms2_pin;             /* 细分 MS2 GPIO 引脚 */
+    GPIO_TypeDef *en_port;        /* 使能 GPIO 端口 */
+    uint16_t en_pin;              /* 使能 GPIO 引脚, 低电平使能 */
+    uint32_t timer_clock_hz;      /* 定时器计数频率, 用于 Hz 到 ARR 换算 */
+    uint32_t frequency_hz;        /* 当前输出脉冲频率 */
+    uint8_t subdivision;          /* 当前细分, 默认 64 细分 */
+    uint8_t direction;            /* 当前方向, 0 和 1 对应两个转向 */
+    uint8_t running;              /* 运行状态, 1 为正在输出 PWM */
 } StepperMotor;
 
+/* main.c 中的通用返回缓冲区, 本模块复用它组装 D2OK/D2ERR 应答。 */
 extern char result_code[CMD_BUFFER_SIZE];
 
+/*
+ * 四路灌流泵硬件映射表。
+ * 第1路: TIM1_CH1, DIR PB8,  MS1 PE0, MS2 PB9, EN PE1
+ * 第2路: TIM2_CH1, DIR PB3,  MS1 PB5, MS2 PB4, EN PB6
+ * 第3路: TIM3_CH1, DIR PD4,  MS1 PD6, MS2 PD5, EN PD7
+ * 第4路: TIM4_CH1, DIR PD0,  MS1 PD2, MS2 PD1, EN PD3
+ * 注意: 上位机使用 motor_id=1..4 选择对应泵路。
+ */
 static StepperMotor stepper_motors[STEPPER_COUNT] = {
     {&htim1, TIM_CHANNEL_1, TIM1_DIR_GPIO_Port, TIM1_DIR_Pin, TIM1_MS1_GPIO_Port, TIM1_MS1_Pin, TIM1_MS2_GPIO_Port, TIM1_MS2_Pin, TIM1_EN_GPIO_Port, TIM1_EN_Pin, STEPPER_TIM1_CLK_HZ, STEPPER_DEFAULT_FREQ_HZ, STEPPER_DEFAULT_SUB, STEPPER_DEFAULT_DIR, 0},
     {&htim2, TIM_CHANNEL_1, TIM2_DIR_GPIO_Port, TIM2_DIR_Pin, TIM2_MS1_GPIO_Port, TIM2_MS1_Pin, TIM2_MS2_GPIO_Port, TIM2_MS2_Pin, TIM2_EN_GPIO_Port, TIM2_EN_Pin, STEPPER_TIM234_CLK_HZ, STEPPER_DEFAULT_FREQ_HZ, STEPPER_DEFAULT_SUB, STEPPER_DEFAULT_DIR, 0},
@@ -81,6 +101,9 @@ static StepperMotor *Stepper_GetMotor(uint8_t motor_id)
     return &stepper_motors[motor_id - 1U];
 }
 
+/*
+ * 设置细分引脚。默认 64 细分, 用于低流量稳定灌流。
+ */
 static void Stepper_SetSubdivisionPins(StepperMotor *motor, uint8_t subdivision)
 {
     GPIO_PinState ms1 = GPIO_PIN_RESET;
@@ -118,6 +141,9 @@ static void Stepper_SetDirectionPin(StepperMotor *motor, uint8_t direction)
     motor->direction = direction ? 1U : 0U;
 }
 
+/*
+ * 将 Hz 频率换算成定时器 ARR/CCR, CCR 取 ARR 的一半形成 50% 占空比。
+ */
 static uint8_t Stepper_ApplyFrequencyHz(StepperMotor *motor, uint32_t frequency_hz)
 {
     uint32_t arr;
@@ -139,6 +165,9 @@ static uint8_t Stepper_ApplyFrequencyHz(StepperMotor *motor, uint32_t frequency_
     return 1;
 }
 
+/*
+ * 加减速过程, 减少灌流泵启动瞬间冲击和失步风险。
+ */
 static uint8_t Stepper_RampFrequencyHz(StepperMotor *motor, uint32_t target_hz)
 {
     uint32_t start_hz;
@@ -211,6 +240,9 @@ static void Stepper_StopMotor(uint8_t motor_id)
     Stepper_SendText(result_code);
 }
 
+/*
+ * 四路同步启动: 先开启全部 PWM, 再统一爬升到各自目标频率。
+ */
 static void Stepper_StartAll(void)
 {
     uint8_t i;
@@ -410,6 +442,9 @@ static void Stepper_HandleStartStop(const char *command, uint8_t start)
     }
 }
 
+/*
+ * D2 命令入口。支持 dirN:x, subN:x, freqN:x, startN, stopN, startall, stopall。
+ */
 void ProcessD2Command(char *command)
 {
     size_t len;
@@ -464,6 +499,9 @@ void Stop_StepperMotor(void)
     Stepper_StopMotor(1U);
 }
 
+/*
+ * 电机模块初始化: 四路默认 64 细分、9000Hz、停止状态。
+ */
 void StepperMotor_Init(void)
 {
     uint8_t i;
