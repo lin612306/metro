@@ -1,3 +1,9 @@
+/*
+ * 文件: MY_Temper.c
+ * 功能: D0/D1 双路温控通信模块。
+ * 硬件关系: USART2 连接外部温控器, USART3 连接内部温控器, USART1 连接 Qt 上位机。
+ * 设计说明: 按论文硬件总框图, STM32 当前不直接采集 ADC, 也不直接输出加热 PWM。
+ */
 #include "MY_Temper.h"
 #include <stdarg.h>
 
@@ -347,7 +353,7 @@ static void Temp_ProcessCommand(TempChannelId id, char *command)
             Temp_SendToHost(&controller, "%sERR:save\r\n", controller.prefix);
         }
     } else if (strcmp(name, "getcfg") == 0) {
-        Temp_SendToHost(&controller, "%sCFG:target=%.2f,Kp=%.3f,Ki=%.3f,Kd=%.3f\r\n",
+        Temp_SendToHost(&controller, "%sCFG:target=%.2f,Kp=%.3f,Ti=%.3f,Td=%.3f\r\n",
                         controller.prefix,
                         controller.config->target_temp,
                         controller.config->kp,
@@ -358,6 +364,7 @@ static void Temp_ProcessCommand(TempChannelId id, char *command)
     }
 }
 
+/* D0 命令入口: 外部温控器, 论文目标一般为 30 摄氏度。 */
 void ProcessD0Command(char *command)
 {
     Temp_ProcessCommand(TEMP_CHANNEL_INTERNAL, command);

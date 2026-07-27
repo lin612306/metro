@@ -1,3 +1,9 @@
+/*
+ * File: uart_dma.c
+ * Purpose: Central UART DMA receive and FIFO transmit support.
+ * Hardware map: USART1 talks to Qt, USART2/USART3 talk to two temperature controllers, UART4 talks to the CO2 sensor.
+ * Design note: DMA buffers only capture raw bytes; business modules should consume data from FIFO objects.
+ */
 #include "stm32f4xx.h"                  // Device header
 #include "stm32f4xx_hal.h"              // HAL header for GPIO definitions
 #include "stm32f4xx_hal_uart.h"
@@ -43,6 +49,7 @@ volatile uint8_t uart2_tx_complete_flag = 1; // 初始化为1，允许首次发送
 volatile uint8_t uart3_tx_complete_flag = 1; // 初始化为1，允许首次发送
 volatile uint8_t uart4_tx_complete_flag = 1; // 初始化为1，允许首次发送
 
+/* DMA receive callback. It copies only the newly received bytes from the circular DMA buffer into the matching FIFO. */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
     if (huart->Instance == USART1) 
@@ -147,6 +154,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
 
 
+/* UART transmit-complete callback. The flag allows the next pending FIFO packet to be sent. */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) 
@@ -178,6 +186,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
  * @note        本函数清除串口溢出标志，重新开启串口接收中断
  * @retval      无
  */
+/* UART error callback. Restart DMA reception so a framing/noise error does not permanently stop communication. */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
 	if(huart->ErrorCode & HAL_UART_ERROR_ORE)	//串口溢出错误
@@ -198,6 +207,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 }
 
 
+/* Send queued USART1 text back to the Qt upper computer. Most D0/D1/D2/D3 replies leave through this function. */
 void send_data_from_tx_fifo(void) 
 {
     if (uart1_tx_complete_flag) 
@@ -281,6 +291,7 @@ void send_data_from_tx_fifo(void)
  * 功能: 初始化所有与 UART 相关的 DMA、FIFO、状态标志
  * 说明: 在 main() 函数中调用一次即可
  */
+/* Initialize all UART FIFOs and start DMA reception before protocol modules begin parsing commands. */
 void UART_System_Init(void)
 {
     /* 初始化 FIFO 缓冲区 */

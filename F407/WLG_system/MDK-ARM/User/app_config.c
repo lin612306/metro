@@ -1,14 +1,20 @@
+/*
+ * 文件: app_config.c
+ * 功能: 系统参数 Flash 保存和恢复。
+ * 设计: 使用 magic/version/crc32 三重校验, 防止误读空 Flash 或旧结构数据。
+ */
 #include "app_config.h"
 
 #include <string.h>
 
 #define APP_CONFIG_MAGIC        0x4D455452UL
-#define APP_CONFIG_VERSION      1UL
+#define APP_CONFIG_VERSION      2UL
 #define APP_CONFIG_FLASH_ADDR   0x08060000UL
 #define APP_CONFIG_FLASH_SECTOR FLASH_SECTOR_7
 
 static AppConfig g_app_config;
 
+/* CRC32 protects the whole AppConfig block against incomplete Flash writes or stale data. */
 static uint32_t AppConfig_Crc32(const uint8_t *data, uint32_t len)
 {
     uint32_t crc = 0xFFFFFFFFUL;
@@ -28,6 +34,7 @@ static uint32_t AppConfig_Crc32(const uint8_t *data, uint32_t len)
     return ~crc;
 }
 
+/* Calculate CRC with the crc32 field cleared, so the stored checksum does not affect the result. */
 static uint32_t AppConfig_CalcConfigCrc(const AppConfig *config)
 {
     AppConfig temp;
@@ -37,6 +44,7 @@ static uint32_t AppConfig_CalcConfigCrc(const AppConfig *config)
     return AppConfig_Crc32((const uint8_t *)&temp, sizeof(temp));
 }
 
+/* Load safe defaults used when Flash is empty, version mismatched, or CRC check fails. */
 void AppConfig_LoadDefaults(void)
 {
     uint8_t i;
@@ -46,31 +54,35 @@ void AppConfig_LoadDefaults(void)
     g_app_config.version = APP_CONFIG_VERSION;
 
     g_app_config.d0_temp.target_temp = 37.0f;
-    g_app_config.d0_temp.kp = 10.0f;
-    g_app_config.d0_temp.ki = 0.5f;
-    g_app_config.d0_temp.kd = 1.0f;
+    g_app_config.d0_temp.kp = 0.600f;
+    g_app_config.d0_temp.ki = 0.500f;
+    g_app_config.d0_temp.kd = 0.125f;
 
     g_app_config.d1_temp.target_temp = 30.0f;
-    g_app_config.d1_temp.kp = 10.0f;
-    g_app_config.d1_temp.ki = 0.5f;
-    g_app_config.d1_temp.kd = 1.0f;
+    g_app_config.d1_temp.kp = 0.600f;
+    g_app_config.d1_temp.ki = 0.500f;
+    g_app_config.d1_temp.kd = 0.125f;
 
     g_app_config.co2.target_ppm = 50000UL;
-    g_app_config.co2.kp = 1.0f;
-    g_app_config.co2.ki = 0.05f;
+    g_app_config.co2.kp = 0.010f;
+    g_app_config.co2.ki = 0.001f;
+    g_app_config.co2.deadband_ppm = 2000U;
+    g_app_config.co2.min_duty_percent = 8.0f;
+    g_app_config.co2.pwm_period_ms = 1000U;
     g_app_config.co2.control_enabled = 0U;
 
     for (i = 0U; i < APP_CONFIG_MOTOR_COUNT; i++) {
         g_app_config.motor[i].direction = 1U;
         g_app_config.motor[i].subdivision = 64U;
         g_app_config.motor[i].frequency_hz = 9000UL;
-        g_app_config.motor[i].flow_k = 1.0f;
-        g_app_config.motor[i].flow_b = 0.0f;
+        g_app_config.motor[i].flow_k = 18165.304f;
+        g_app_config.motor[i].flow_b = 131.301f;
     }
 
     g_app_config.crc32 = AppConfig_CalcConfigCrc(&g_app_config);
 }
 
+/* Try to load Flash config; fall back to defaults unless magic, version, and CRC all match. */
 void AppConfig_Init(void)
 {
     const AppConfig *stored = (const AppConfig *)APP_CONFIG_FLASH_ADDR;
@@ -84,6 +96,7 @@ void AppConfig_Init(void)
     }
 }
 
+/* Erase one Flash sector and write the complete AppConfig structure word by word. */
 HAL_StatusTypeDef AppConfig_Save(void)
 {
     HAL_StatusTypeDef status;
@@ -120,11 +133,13 @@ HAL_StatusTypeDef AppConfig_Save(void)
     return status;
 }
 
+/* Read-only accessor for modules that only need current configuration values. */
 const AppConfig *AppConfig_Get(void)
 {
     return &g_app_config;
 }
 
+/* Mutable accessor used by protocol handlers before an explicit AppConfig_Save command. */
 AppConfig *AppConfig_Mutable(void)
 {
     return &g_app_config;

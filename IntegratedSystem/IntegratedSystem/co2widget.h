@@ -7,6 +7,7 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QLayout>
+#include <QGridLayout>
 #include <QTimer>
 #include <QComboBox>
 #include <QDebug>
@@ -14,6 +15,7 @@
 #include <QPlainTextEdit>
 #include <QMessageBox>
 #include <QDoubleSpinBox>
+#include <QSpinBox>
 #include <QtCharts>
 #include <QDialog>
 #include <QScatterSeries>
@@ -36,6 +38,8 @@ private slots:
     void onStopControl();
     void onSetPI();
     void onSetTarget();
+    void onSetAdvanced();
+    void onSetCohenCoon();
 
 private:
     QLabel *lblCurrentCO2;
@@ -49,6 +53,14 @@ private:
     QDoubleSpinBox *spinP;
     QDoubleSpinBox *spinI;
     QPushButton *btnSetPI;
+    QSpinBox *spinDeadband;
+    QDoubleSpinBox *spinMinDuty;
+    QSpinBox *spinPwmPeriod;
+    QPushButton *btnSetAdvanced;
+    QDoubleSpinBox *spinCCK;
+    QDoubleSpinBox *spinCCL;
+    QDoubleSpinBox *spinCCT;
+    QPushButton *btnSetCC;
 };
 
 class CO2Widget : public QWidget

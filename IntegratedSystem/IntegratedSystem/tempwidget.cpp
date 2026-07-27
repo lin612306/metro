@@ -5,6 +5,16 @@
 #include <QDateTime>
 #include <QScrollBar>
 
+/*
+ * TempWidget 是 D0/D1 双温控页面。
+ *
+ * 按论文硬件设计, STM32 不直接驱动加热膜, 而是通过两个串口分别连接:
+ * D0 -> USART2 -> 外部温控器, 常用目标 30 C。
+ * D1 -> USART3 -> 内部温控器, 常用目标 37 C。
+ *
+ * Qt 只和 STM32 的 USART1 通信, 命令前缀 D0/D1 用于区分两个温控器。
+ * PID 页面只显示 Kp/Ti/Td 参数输入, 具体参数来源由实验记录或论文说明保存。
+ */
 // ============================================================================
 //  TempCtrlWidget 实现
 // ============================================================================
@@ -52,19 +62,19 @@ TempCtrlWidget::TempCtrlWidget(const QString &title, const QString &prefix, QWid
 
     // --- 第三行：PID ---
     QHBoxLayout *pidLayout = new QHBoxLayout();
-    spinP = new QDoubleSpinBox(); spinP->setRange(0, 1000); spinP->setDecimals(2); spinP->setValue(10.0);
-    spinI = new QDoubleSpinBox(); spinI->setRange(0, 1000); spinI->setDecimals(2); spinI->setValue(0.5);
-    spinD = new QDoubleSpinBox(); spinD->setRange(0, 1000); spinD->setDecimals(2); spinD->setValue(1.0);
-    int pidBoxWidth = 82;
+    spinP = new QDoubleSpinBox(); spinP->setRange(0, 100); spinP->setDecimals(3); spinP->setSingleStep(0.001); spinP->setValue(0.600);
+    spinI = new QDoubleSpinBox(); spinI->setRange(0, 100); spinI->setDecimals(3); spinI->setSingleStep(0.001); spinI->setValue(0.500);
+    spinD = new QDoubleSpinBox(); spinD->setRange(0, 100); spinD->setDecimals(3); spinD->setSingleStep(0.001); spinD->setValue(0.125);
+    int pidBoxWidth = 92;
     spinP->setFixedWidth(pidBoxWidth); spinI->setFixedWidth(pidBoxWidth); spinD->setFixedWidth(pidBoxWidth);
     spinP->setFixedHeight(26); spinI->setFixedHeight(26); spinD->setFixedHeight(26);
     btnSetPID = new QPushButton("设置PID");
-    btnSetPID->setFixedWidth(78);
+    btnSetPID->setFixedWidth(84);
     btnSetPID->setFixedHeight(26);
     pidLayout->addStretch();
-    pidLayout->addWidget(new QLabel("P")); pidLayout->addWidget(spinP); pidLayout->addSpacing(15);
-    pidLayout->addWidget(new QLabel("I")); pidLayout->addWidget(spinI); pidLayout->addSpacing(15);
-    pidLayout->addWidget(new QLabel("D")); pidLayout->addWidget(spinD); pidLayout->addSpacing(15);
+    pidLayout->addWidget(new QLabel("Kp")); pidLayout->addWidget(spinP); pidLayout->addSpacing(12);
+    pidLayout->addWidget(new QLabel("Ti")); pidLayout->addWidget(spinI); pidLayout->addSpacing(12);
+    pidLayout->addWidget(new QLabel("Td")); pidLayout->addWidget(spinD); pidLayout->addSpacing(12);
     pidLayout->addWidget(btnSetPID);
     pidLayout->addStretch();
 
@@ -145,12 +155,14 @@ void TempCtrlWidget::updateCurrentTempDisplay(double val)
 
 void TempCtrlWidget::onSetTemp()
 {
+    // m_prefix 是 D0 或 D1, 所以同一个控件类可以控制外部和内部两个温控器。
     QString cmd = QString("%1settemp:%2@").arg(m_prefix).arg(spinTargetTemp->value());
     emit sendCommandSignal(cmd);
 }
 
 void TempCtrlWidget::onSetPID()
 {
+    // PID 参数分三条命令发送, 下位机可以分别保存和转发, 出错时也更容易定位。
     emit sendCommandSignal(QString("%1setp:%2@").arg(m_prefix).arg(spinP->value()));
     emit sendCommandSignal(QString("%1seti:%2@").arg(m_prefix).arg(spinI->value()));
     emit sendCommandSignal(QString("%1setd:%2@").arg(m_prefix).arg(spinD->value()));
@@ -456,6 +468,7 @@ void TempWidget::onPollingTimer()
 
 void TempWidget::handleSerialFrame(const QString &prefix, const QString &line)
 {
+    // SerialManager 已经做了前缀识别, 这里再过滤 D2/D3, 防止电机或 CO2 文本进入温度曲线。
     if (prefix == "D2" || prefix == "D3") {
         return;
     }

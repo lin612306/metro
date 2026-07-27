@@ -5,6 +5,20 @@
 #include <QScrollBar>
 #include <QRegularExpression>
 
+/*
+ * CO2Widget 是 D3 二氧化碳控制页面。
+ *
+ * 硬件链路为 Qt -> USART1 -> STM32 -> UART4 CO2 传感器。执行器输出在
+ * STM32 端通过 O1_IN/O2_IN 软件 PWM 完成, Qt 页面不直接控制 GPIO。
+ *
+ * 常用命令:
+ * D3getco2@              读取当前浓度。
+ * D3settarget:50000@     设置目标浓度。
+ * D3setdeadband:2000@    设置死区。
+ * D3setminduty:8.0@      设置最小有效占空比。
+ * D3setcc:K,L,T@         手动写入 Cohen-Coon 过程参数并计算 PI。
+ * D3startAT@             启动 STM32 自动阶跃辨识。
+ */
 // ============================================================================
 //  CO2CtrlWidget 实现
 // ============================================================================
@@ -95,6 +109,56 @@ CO2CtrlWidget::CO2CtrlWidget(const QString &title, QWidget *parent)
     piLayout->addWidget(btnSetPI);
     piLayout->addStretch();
 
+    QGridLayout *advancedLayout = new QGridLayout();
+    spinDeadband = new QSpinBox();
+    spinDeadband->setRange(0, 20000);
+    spinDeadband->setValue(2000);
+    spinDeadband->setSuffix(" ppm");
+    spinDeadband->setMinimumWidth(110);
+    spinMinDuty = new QDoubleSpinBox();
+    spinMinDuty->setRange(0, 50);
+    spinMinDuty->setDecimals(1);
+    spinMinDuty->setValue(8.0);
+    spinMinDuty->setSuffix(" %");
+    spinMinDuty->setMinimumWidth(95);
+    spinPwmPeriod = new QSpinBox();
+    spinPwmPeriod->setRange(200, 10000);
+    spinPwmPeriod->setValue(1000);
+    spinPwmPeriod->setSuffix(" ms");
+    spinPwmPeriod->setMinimumWidth(105);
+    btnSetAdvanced = new QPushButton("设置补偿");
+    advancedLayout->addWidget(new QLabel("死区:"), 0, 0);
+    advancedLayout->addWidget(spinDeadband, 0, 1);
+    advancedLayout->addWidget(new QLabel("最小占空比:"), 0, 2);
+    advancedLayout->addWidget(spinMinDuty, 0, 3);
+    advancedLayout->addWidget(new QLabel("PWM周期:"), 1, 0);
+    advancedLayout->addWidget(spinPwmPeriod, 1, 1);
+    advancedLayout->addWidget(btnSetAdvanced, 1, 3);
+    advancedLayout->setColumnStretch(4, 1);
+
+    QGridLayout *ccLayout = new QGridLayout();
+    spinCCK = new QDoubleSpinBox();
+    spinCCL = new QDoubleSpinBox();
+    spinCCT = new QDoubleSpinBox();
+    spinCCK->setRange(0.001, 100000.0);
+    spinCCL->setRange(0.1, 10000.0);
+    spinCCT->setRange(0.1, 10000.0);
+    spinCCK->setDecimals(3);
+    spinCCL->setDecimals(1);
+    spinCCT->setDecimals(1);
+    spinCCK->setMinimumWidth(95);
+    spinCCL->setMinimumWidth(90);
+    spinCCT->setMinimumWidth(90);
+    btnSetCC = new QPushButton("Cohen-Coon");
+    ccLayout->addWidget(new QLabel("K:"), 0, 0);
+    ccLayout->addWidget(spinCCK, 0, 1);
+    ccLayout->addWidget(new QLabel("L:"), 0, 2);
+    ccLayout->addWidget(spinCCL, 0, 3);
+    ccLayout->addWidget(new QLabel("T:"), 1, 0);
+    ccLayout->addWidget(spinCCT, 1, 1);
+    ccLayout->addWidget(btnSetCC, 1, 3);
+    ccLayout->setColumnStretch(4, 1);
+
     // 加入主布局
     mainLayout->addLayout(currLayout);
     mainLayout->addLayout(targetLayout); // target concentration
@@ -102,6 +166,8 @@ CO2CtrlWidget::CO2CtrlWidget(const QString &title, QWidget *parent)
     mainLayout->addLayout(atLayout);    // 启动自整定
     mainLayout->addLayout(btnLayout2);  // 启停控制
     mainLayout->addLayout(piLayout);    // PI控制
+    mainLayout->addLayout(advancedLayout);
+    mainLayout->addLayout(ccLayout);
 
 
     // 信号槽
@@ -111,6 +177,8 @@ CO2CtrlWidget::CO2CtrlWidget(const QString &title, QWidget *parent)
     connect(btnStartCtrl, &QPushButton::clicked, this, &CO2CtrlWidget::onStartControl);
     connect(btnStopCtrl, &QPushButton::clicked, this, &CO2CtrlWidget::onStopControl);
     connect(btnSetPI, &QPushButton::clicked, this, &CO2CtrlWidget::onSetPI);
+    connect(btnSetAdvanced, &QPushButton::clicked, this, &CO2CtrlWidget::onSetAdvanced);
+    connect(btnSetCC, &QPushButton::clicked, this, &CO2CtrlWidget::onSetCohenCoon);
 }
 
 void CO2CtrlWidget::updateCurrentCO2Display(long val)
@@ -164,6 +232,23 @@ void CO2CtrlWidget::onSetPI()
 {
     emit sendCommandSignal(QString("D3setp:%1@").arg(spinP->value()));
     emit sendCommandSignal(QString("D3seti:%1@").arg(spinI->value()));
+}
+
+void CO2CtrlWidget::onSetAdvanced()
+{
+    // 补偿参数分三条命令发送, 下位机逐条做范围检查并分别返回 D3OK/D3ERR。
+    emit sendCommandSignal(QString("D3setdeadband:%1@").arg(spinDeadband->value()));
+    emit sendCommandSignal(QString("D3setminduty:%1@").arg(spinMinDuty->value()));
+    emit sendCommandSignal(QString("D3setpwm:%1@").arg(spinPwmPeriod->value()));
+}
+
+void CO2CtrlWidget::onSetCohenCoon()
+{
+    // K/L/T 来自阶跃响应实验。STM32 端负责套 Cohen-Coon 公式并保存 PI。
+    emit sendCommandSignal(QString("D3setcc:%1,%2,%3@")
+                           .arg(spinCCK->value())
+                           .arg(spinCCL->value())
+                           .arg(spinCCT->value()));
 }
 
 // ============================================================================
@@ -387,6 +472,7 @@ void CO2Widget::closeSerialPort()
 
 void CO2Widget::handleSendCommand(QString cmd)
 {
+    // CO2 控制子面板只生成命令, 串口发送统一交给 SerialManager。
     SerialManager::instance()->sendCommand(cmd);
 }
 
@@ -398,6 +484,7 @@ void CO2Widget::onPollingTimer()
 
 void CO2Widget::handleSerialFrame(const QString &prefix, const QString &line)
 {
+    // 只接收 D3 或旧版 CO2 返回文本, 其它模块的串口返回不参与 CO2 曲线更新。
     if (!(prefix == "D3" || line.startsWith("CO2Concentration:") || line.startsWith("CurrentPI:"))) {
         return;
     }

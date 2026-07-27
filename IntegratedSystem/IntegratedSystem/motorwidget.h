@@ -49,14 +49,17 @@ private:
     void sendCommand(const QString &cmd);
 
     // 频率计算辅助函数
-    int calculateFreqFromFlow(double flow);
+    int calculateFreqFromFlow(int motorId, double flow);
 
     struct MotorControls {
         QComboBox *dirCombo;
         QComboBox *subCombo;
         QSpinBox *freqSpin;
         QDoubleSpinBox *flowSpin;
-        QDoubleSpinBox *shearSpin; // 新增：用于显示剪切力
+        QDoubleSpinBox *shearSpin;
+        QDoubleSpinBox *shearKSpin;
+        QDoubleSpinBox *flowKSpin;
+        QDoubleSpinBox *flowBSpin;
         QPushButton *btnSetFreq;  // 保存引用以便改名或操作
     };
     QMap<int, MotorControls> m_motorWidgets;

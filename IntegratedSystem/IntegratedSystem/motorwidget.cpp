@@ -8,6 +8,20 @@
 #include <QDateTime>
 #include <QDebug>
 
+/*
+ * MotorWidget 是 D2 灌流泵控制页面。
+ *
+ * 上位机负责实验层面的参数输入: 第几路泵、方向、细分和目标流量。
+ * STM32 负责硬件层面的 STEP/DIR/EN GPIO 与 PWM 频率输出。
+ *
+ * 协议对应关系:
+ * D2dirN:x@       设置第 N 路方向。
+ * D2subN:x@       设置第 N 路细分, 默认推荐 64。
+ * D2flowcalN:k,b@ 设置第 N 路流量曲线 Hz = k * ml/h + b。
+ * D2flowN:x@      按 ml/h 控制该路泵。
+ * D2startall@     四路同步启动。
+ * D2stopall@      四路同步停止。
+ */
 MotorWidget::MotorWidget(QWidget *parent)
     : QWidget(parent)
 {
@@ -124,6 +138,8 @@ void MotorWidget::initUI()
 // 辅助函数：自动生成单个电机的控制面板
 void MotorWidget::createMotorPanel(int motorId, QWidget *parent, QGridLayout *mainLayout, int row, int col)
 {
+    Q_UNUSED(parent);
+
     QGroupBox *group = new QGroupBox(QString("电机 #%1").arg(motorId));
     QVBoxLayout *layout = new QVBoxLayout();
 
@@ -171,6 +187,29 @@ void MotorWidget::createMotorPanel(int motorId, QWidget *parent, QGridLayout *ma
     flowLayout->addWidget(flowSpin);
     flowLayout->addWidget(rangeLabel);
     flowLayout->addWidget(btnSetFlowAndFreq);
+
+    QDoubleSpinBox *flowKSpin = new QDoubleSpinBox();
+    QDoubleSpinBox *flowBSpin = new QDoubleSpinBox();
+    flowKSpin->setRange(1.0, 100000.0);
+    flowKSpin->setDecimals(3);
+    flowKSpin->setValue(18165.304);
+    flowKSpin->setFixedWidth(95);
+    flowBSpin->setRange(-10000.0, 10000.0);
+    flowBSpin->setDecimals(3);
+    flowBSpin->setValue(131.301);
+    flowBSpin->setFixedWidth(90);
+    QDoubleSpinBox *shearKSpin = new QDoubleSpinBox();
+    shearKSpin->setRange(0.0001, 100.0);
+    shearKSpin->setDecimals(4);
+    shearKSpin->setValue(2.1333);
+    shearKSpin->setFixedWidth(85);
+    /*
+     * 标定控件不显示在实验操作界面上。
+     * 下位机仍保留每路泵 k/b 标定能力, Qt 这里使用默认值保持协议一致。
+     */
+    flowKSpin->hide();
+    flowBSpin->hide();
+    shearKSpin->hide();
 
     // --- 剪切力计算 (只读) ---
     QHBoxLayout *shearLayout = new QHBoxLayout();
@@ -226,6 +265,9 @@ void MotorWidget::createMotorPanel(int motorId, QWidget *parent, QGridLayout *ma
     ctrls.freqSpin = freqSpin;
     ctrls.flowSpin = flowSpin;
     ctrls.shearSpin = shearSpin; // 保存剪切力控件引用
+    ctrls.shearKSpin = shearKSpin;
+    ctrls.flowKSpin = flowKSpin;
+    ctrls.flowBSpin = flowBSpin;
     ctrls.btnSetFreq = btnSetFlowAndFreq;
     m_motorWidgets.insert(motorId, ctrls);
 
@@ -236,6 +278,8 @@ void MotorWidget::createMotorPanel(int motorId, QWidget *parent, QGridLayout *ma
     // 流量改变时，实时更新频率和剪切力显示
     connect(flowSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, [=](double val){ onFlowValueChanged(motorId, val); });
+    connect(shearKSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, [=](double){ onFlowValueChanged(motorId, flowSpin->value()); });
 
     // 点击应用流量
     connect(btnSetFlowAndFreq, &QPushButton::clicked, this, [=](){ onSetFreqClicked(motorId); });
@@ -248,29 +292,24 @@ void MotorWidget::createMotorPanel(int motorId, QWidget *parent, QGridLayout *ma
 }
 
 // --- 核心算法：体积流量转频率 ---
-int MotorWidget::calculateFreqFromFlow(double flow)
+int MotorWidget::calculateFreqFromFlow(int motorId, double flow)
 {
-    // 实验平均数据点：
-    // P1: (0.1579, 3000)
-    // P2: (0.3111, 6000)
-    // P3: (0.4882, 9000)
-    double freq = 3000;
+    // 每一路泵使用自己的 k,b 标定。Qt 先在界面上预览频率,
+    // STM32 收到 D2flow 后还会用同一组 k,b 再计算一次, 保证上下位机语义一致。
+    double k = 18165.304;
+    double b = 131.301;
+    double freq;
 
-    if (flow <= 0.3111) {
-        // 第一段插值: 0.1579 ~ 0.3111 对应 3000 ~ 6000
-        double k1 = (6000.0 - 3000.0) / (0.3111 - 0.1579);
-        freq = 3000.0 + (flow - 0.1579) * k1;
-    } else {
-        // 第二段插值及外推: 大于0.3111 对应 6000 ~ 60000
-        double k2 = (9000.0 - 6000.0) / (0.4882 - 0.3111);
-        freq = 6000.0 + (flow - 0.3111) * k2;
+    if (m_motorWidgets.contains(motorId)) {
+        k = m_motorWidgets[motorId].flowKSpin->value();
+        b = m_motorWidgets[motorId].flowBSpin->value();
     }
 
-    // 限制范围
+    freq = k * flow + b;
     if (freq < 3000) freq = 3000;
     if (freq > 60000) freq = 60000;
 
-    return static_cast<int>(freq);
+    return static_cast<int>(freq + 0.5);
 }
 
 // --- 流量值变化处理 ---
@@ -279,10 +318,11 @@ void MotorWidget::onFlowValueChanged(int motorId, double flowVal)
     if (!m_motorWidgets.contains(motorId)) return;
 
     // 1. 计算转换后的频率
-    int calcFreq = calculateFreqFromFlow(flowVal);
+    int calcFreq = calculateFreqFromFlow(motorId, flowVal);
 
-    // 2. 计算剪切力 (由淋巴液参数及 250μm 方形流道推导: tau ≈ 2.1333 * Q)
-    double calcShear = 2.1333 * flowVal;
+    // 2. 计算剪切力: 系数由真实微流道尺寸和流体黏度重新标定。
+    double shearK = m_motorWidgets[motorId].shearKSpin->value();
+    double calcShear = shearK * flowVal;
 
     // 更新界面上的频率显示
     m_motorWidgets[motorId].freqSpin->blockSignals(true);
@@ -329,6 +369,8 @@ void MotorWidget::sendCommand(const QString &cmd)
 
 void MotorWidget::handleSerialFrame(const QString &prefix, const QString &line)
 {
+    // 当前电机页主要靠统一日志显示 D2OK/D2ERR。
+    // 后续若要把 D2STATUS 回填到界面, 应在这里解析 line 并更新四路控件。
     Q_UNUSED(prefix);
     Q_UNUSED(line);
 }
@@ -375,10 +417,14 @@ void MotorWidget::onSetSubClicked(int motorId)
 void MotorWidget::onSetFreqClicked(int motorId)
 {
     if(!m_motorWidgets.contains(motorId)) return;
-    // 下发计算后的频率给硬件
-    int freqVal = m_motorWidgets[motorId].freqSpin->value();
-    QString cmd = QString("D2freq%1:%2@").arg(motorId).arg(freqVal);
-    sendCommand(cmd);
+
+    // 先发标定曲线, 再发目标流量。
+    // 这样 STM32 即使刚上电, 也能按当前界面参数进行流量到频率的换算。
+    const MotorControls &ctrls = m_motorWidgets[motorId];
+    QString calCmd = QString("D2flowcal%1:%2,%3@").arg(motorId).arg(ctrls.flowKSpin->value()).arg(ctrls.flowBSpin->value());
+    QString flowCmd = QString("D2flow%1:%2@").arg(motorId).arg(ctrls.flowSpin->value(), 0, 'f', 4);
+    sendCommand(calCmd);
+    sendCommand(flowCmd);
 }
 
 void MotorWidget::onStartClicked(int motorId)

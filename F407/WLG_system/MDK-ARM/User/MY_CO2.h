@@ -28,6 +28,8 @@ void GetCurrentCO2(char* command);
 void SetCo2Base(char* command);
 // 初始化CO2模块的函数声明
 void CO2Module_Init(void);
+// CO2闭环控制任务, 在main循环中周期调用
+void CO2_ControlTask(void);
 
 
 #endif

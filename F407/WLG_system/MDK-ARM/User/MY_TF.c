@@ -1,3 +1,9 @@
+/*
+ * File: MY_TF.c
+ * Purpose: Legacy TF/storage command wrapper.
+ * This file contains early file create/open/delete/read/write commands and float-array storage helpers.
+ * Architecture note: current D1 is used by the internal temperature controller, so this legacy D1 entry must not be enabled at the same time.
+ */
 #include "stm32f4xx.h"                  // Device header
 #include "stm32f4xx_hal.h"              // HAL header for GPIO definitions
 #include "MY_TF.h"
@@ -41,6 +47,7 @@ ArrayMapping array_map[MAX_ARRAY_MAP_SIZE] = {
 size_t array_map_count = 2;
 
 // 将数组添加到映射表
+/* Register a float array by name so later read/write commands can find calibration data by text key. */
 int add_array_to_map(const char* name, float* array, size_t size)
 {
     if (array_map_count >= MAX_ARRAY_MAP_SIZE) {
@@ -54,6 +61,7 @@ int add_array_to_map(const char* name, float* array, size_t size)
 }
 
 // 根据数组名获取数组
+/* Return the registered float array pointer for a given name, or NULL when the name is unknown. */
 float* get_array_by_name(char* array_name) 
 {
     size_t num_arrays = sizeof(array_map) / sizeof(array_map[0]);
@@ -68,6 +76,7 @@ float* get_array_by_name(char* array_name)
 }
 
 // 处理D1命令
+/* Legacy TF command dispatcher. Check command-prefix conflicts before reusing it in the current D0/D1/D2/D3 protocol. */
 void ProcessD1Command(char* command)
 {
     size_t command_len = strlen(command);      // 获取命令长度
@@ -144,6 +153,7 @@ void ProcessD1Command(char* command)
     }
 }
 
+/* Build and send the create-file packet to the TF module, then translate the module response into result_code text. */
 char* TF_SendCreateFile(uint8_t* data)
 {
     HAL_GPIO_WritePin(GPIOB, MYTF_BY_Pin, GPIO_PIN_RESET);  // 指定TF卡为接收模式
@@ -196,6 +206,7 @@ char* TF_SendCreateFile(uint8_t* data)
 
 
 
+/* Parse the CreateFile command from the host and call TF_SendCreateFile with validated parameters. */
 void CreateFile(char* command)
 {
     char* colon_pos = strchr(command, ':'); // 找到冒号的位置
@@ -900,6 +911,7 @@ void DeleteDocument(char* command)
 
 
 
+/* Send a read command to the TF module and copy the returned payload into the caller response buffer. */
 char* TF_SendRead(unsigned char* data2, int read_len, unsigned char* response)
 {
     HAL_GPIO_WritePin(GPIOB, MYTF_BY_Pin, GPIO_PIN_RESET);  // 指定TF卡为接收模式
@@ -955,6 +967,7 @@ char* TF_SendRead(unsigned char* data2, int read_len, unsigned char* response)
 
 
 
+/* Parse the host Read command and forward the TF read result back to USART1. */
 void Read(char* command)
 {
     // 检查命令格式
@@ -1078,6 +1091,7 @@ char* TF_SendWrite1(uint8_t* data, int32_t len)
 
 
 
+/* Write one block of raw data to the storage module; kept for early storage validation. */
 void Write1(char* command)
 {
     char* colon_pos = strchr(command, ':');
@@ -1202,6 +1216,7 @@ char* TF_SendWrite2(float* arr1, float* arr2, int len)
 
 
 
+/* Write two float arrays, typically used for calibration or curve data storage. */
 void Write2(char* command)
 {
     char* first_comma = strchr(command, ',');
@@ -1343,6 +1358,7 @@ char* TF_SendWrite3(float* arr1, float* arr2, int location)
 
 
 
+/* Update a selected position in stored curve data instead of rewriting the full array. */
 void Write3(char* command)
 {
     char* first_comma = strchr(command, ',');

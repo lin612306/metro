@@ -1,8 +1,15 @@
+/*
+ * File: OUT_Temper.c
+ * Purpose: Legacy external temperature-controller protocol wrapper.
+ * It converts host commands such as settemp/gettemp/setp/seti/setd into the serial protocol of the controller.
+ * Architecture note: new dual-temperature routing is in MY_Temper.c; avoid enabling two D0 handlers together.
+ */
 #include "stm32f4xx.h"                  // Device header
 #include "stm32f4xx_hal.h"              // HAL header for GPIO definitions
 #include "OUT_Temper.h"
 
 
+/* Legacy D0 command dispatcher. It splits the command name before colon and calls the matching temperature action. */
 void ProcessD0Command(char* command)
 {
     size_t command_len = strlen(command);      // 获取命令的长度
@@ -81,6 +88,7 @@ void ProcessD0Command(char* command)
 
 
 
+/* Translate raw controller response bytes into the shared result_code text returned to Qt. */
 static void ProcessResponse(uint8_t *response, uint32_t length) 
 {
     // 检查响应长度
@@ -165,6 +173,7 @@ static void ProcessResponse(uint8_t *response, uint32_t length)
 
 
 
+/* Send the lock command to prevent local or external changes while the experiment is controlled by STM32. */
 static int Temp_Send_SetLock(uint8_t *rx_buf, size_t buf_size, int *out_len, uint32_t timeout_ms)
 {
     if (rx_buf == NULL || out_len == NULL || buf_size == 0) 
@@ -248,6 +257,7 @@ void Lock(char *command)
 
 
 
+/* Send the unlock command so the controller can accept manual/local operations again. */
 static int Temp_Send_SetUnlock(uint8_t *rx_buf, size_t buf_size, int *out_len, uint32_t timeout_ms)
 {
     if (rx_buf == NULL || out_len == NULL || buf_size == 0) 
@@ -332,6 +342,7 @@ void Unlock(char *command)
 
 
 
+/* Build and send the target-temperature command to the external temperature controller. */
 static int Temp_Send_SetTemp(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *temperature, uint32_t timeout_ms)
 {
     if (rx_buf == NULL || out_len == NULL || buf_size == 0 || temperature == NULL) 
@@ -390,6 +401,7 @@ static int Temp_Send_SetTemp(uint8_t *rx_buf, size_t buf_size, int *out_len, con
 * 输入: * - 命令 "D0settemp:X@" 
 * - X 是温度值，例如 "37" 表示设置温度为37℃ 
 */
+/* Validate host temperature text, then forward it to Temp_Send_SetTemp. */
 void SetTemperature(char* command)
 {
     char *colon_pos = strchr(command, ':');
@@ -452,6 +464,7 @@ void SetTemperature(char* command)
 
 
 
+/* Request current temperature from the controller and wait for a bounded-time reply. */
 static int Temp_Send_GetTemp(uint8_t *rx_buf, size_t buf_size, int *out_len, uint32_t timeout_ms)
 {
     if (rx_buf == NULL || out_len == NULL || buf_size == 0) 
@@ -507,6 +520,7 @@ static int Temp_Send_GetTemp(uint8_t *rx_buf, size_t buf_size, int *out_len, uin
  * 输入:
  *  - 命令 "D0gettemp@"
  */
+/* Handle gettemp and return the measured temperature text to the Qt upper computer. */
 void GetCurrentTemperature(char* command)
 {
     uint8_t response[CMD_BUFFER_SIZE] = {0};
@@ -644,6 +658,7 @@ void SetSpeed(char* command)
 
 
 
+/* Send the proportional parameter to the temperature controller. */
 static int Temp_Send_SetPidMode(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *mode, uint32_t timeout_ms)
 {
     if (rx_buf == NULL || out_len == NULL || buf_size == 0 || mode == NULL) 
@@ -876,6 +891,7 @@ void SetP(char* command)
 
 
 
+/* Send the integral/Ti parameter to the temperature controller. */
 static int Temp_Send_SetI(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *i_value, uint32_t timeout_ms)
 {
     if (rx_buf == NULL || out_len == NULL || buf_size == 0 || i_value == NULL) 
@@ -1001,6 +1017,7 @@ void SetI(char* command)
 
 
 
+/* Send the derivative/Td parameter to the temperature controller. */
 static int Temp_Send_SetD(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *d_value, uint32_t timeout_ms)
 {
     if (rx_buf == NULL || out_len == NULL || buf_size == 0 || d_value == NULL) 
@@ -1127,6 +1144,7 @@ void SetD(char* command)
 
 
 
+/* Reserved initialization entry for the legacy external temperature module. */
 void TemperatureSensor_Init(void)
 {
     // 1. 设置温度为默认值

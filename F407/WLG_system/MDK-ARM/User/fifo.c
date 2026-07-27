@@ -1,7 +1,14 @@
+/*
+ * 文件: fifo.c
+ * 功能: 轻量级环形 FIFO 缓冲区。
+ * 用途: 串口 DMA 接收后先写入 FIFO, 业务模块再按需读取命令或应答。
+ * 设计: head 指向下一个写入位置, tail 指向下一个读出位置, count 记录已用字节数。
+ */
 #include "stm32f4xx.h"                  // Device header
 #include "stm32f4xx_hal.h"              // HAL header for GPIO definitions
 #include "fifo.h"
 
+/* 初始化 FIFO 结构, 调用前由外部提供实际缓冲区数组。 */
 void fifo_s_init(fifo_s *fifo, uint8_t *buf, uint16_t size)
 {
     fifo->buf = buf;
@@ -11,6 +18,7 @@ void fifo_s_init(fifo_s *fifo, uint8_t *buf, uint16_t size)
     fifo->count = 0;
 }
 
+/* 写入单字节, 满时返回 FIFO_FULL, 不覆盖旧数据。 */
 uint8_t fifo_s_put(fifo_s *fifo, uint8_t data)
 {
     if (fifo->count == fifo->size) return FIFO_FULL;
@@ -20,6 +28,7 @@ uint8_t fifo_s_put(fifo_s *fifo, uint8_t data)
     return FIFO_OK;
 }
 
+/* 读出单字节, 空时返回 FIFO_EMPTY。 */
 uint8_t fifo_s_get(fifo_s *fifo, uint8_t *data)
 {
     if (fifo->count == 0) return FIFO_EMPTY;
@@ -44,6 +53,10 @@ uint16_t fifo_s_count(fifo_s *fifo)
     return fifo->count;
 }
 
+/*
+ * 批量写入数据。
+ * 如果数据跨过环形缓冲区尾部, 分两段 memcpy 处理。
+ */
 uint8_t fifo_s_puts(fifo_s *fifo, const uint8_t *data, uint16_t len)
 {
     if (fifo->size - fifo->count < len) {
@@ -63,6 +76,10 @@ uint8_t fifo_s_puts(fifo_s *fifo, const uint8_t *data, uint16_t len)
     return FIFO_OK;
 }
 
+/*
+ * 批量读取数据。
+ * 这个函数不做协议解析, 只保证 FIFO 数据顺序正确。
+ */
 uint8_t fifo_s_gets(fifo_s *fifo, uint8_t *data, uint16_t len)
 {
     if (fifo->count < len) {

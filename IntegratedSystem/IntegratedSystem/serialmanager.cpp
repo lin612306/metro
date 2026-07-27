@@ -2,6 +2,16 @@
 
 #include <QDateTime>
 
+/*
+ * SerialManager 是上位机唯一的串口入口。
+ *
+ * 论文硬件结构中, Qt 只通过一根串口线连接 STM32 的 USART1。温度、电机、
+ * CO2 页面虽然是不同界面, 但不能各自抢占同一个串口。因此这里集中处理:
+ * 1. 打开和关闭串口。
+ * 2. 发送完整命令帧, 例如 D2flow1:0.5000@。
+ * 3. 按换行拆分 STM32 返回文本。
+ * 4. 根据 D0/D1/D2/D3 前缀把数据分发给对应页面。
+ */
 SerialManager *SerialManager::instance()
 {
     static SerialManager manager;
@@ -19,6 +29,7 @@ SerialManager::SerialManager(QObject *parent)
 
 bool SerialManager::openPort(const QString &portName, int baudRate)
 {
+    // 如果串口已经按相同参数打开, 直接复用, 避免重复打开导致端口状态抖动。
     if (m_serial.isOpen()) {
         if (m_serial.portName() == portName &&
             m_serial.baudRate() == baudRate) {
@@ -79,6 +90,7 @@ QString SerialManager::lastError() const
 
 bool SerialManager::sendCommand(const QString &command)
 {
+    // 所有页面都通过这里发送命令, 这样 TX 日志和错误处理是统一的。
     if (!m_serial.isOpen()) {
         emit errorMessage("Serial port is not open");
         return false;
@@ -101,6 +113,7 @@ bool SerialManager::sendCommand(const QString &command)
 
 void SerialManager::readSerialData()
 {
+    // STM32 使用 \r\n 作为一帧文本结束。这里先缓存半包, 读到换行后再分发。
     m_rxBuffer.append(m_serial.readAll());
 
     while (m_rxBuffer.contains('\n')) {
@@ -138,6 +151,7 @@ void SerialManager::handleError(QSerialPort::SerialPortError error)
 
 QString SerialManager::detectPrefix(const QString &line) const
 {
+    // 兼容旧版返回文本: 有些温控器或 CO2 函数没有严格以 D0/D1/D3 开头。
     if (line.startsWith("D0") || line.startsWith("Temp") ||
         line.startsWith("Temperature") || line.startsWith("TC1")) {
         return "D0";

@@ -14,11 +14,13 @@
 #include <string.h>
 
 #define STEPPER_COUNT           4U
+/* TIM1 和 TIM2/3/4 当前计数频率不同, Hz 到 ARR 换算必须分开。 */
 #define STEPPER_TIM1_CLK_HZ     1000000UL
 #define STEPPER_TIM234_CLK_HZ   500000UL
 #define STEPPER_MIN_FREQ_HZ     1UL
 #define STEPPER_MAX_FREQ_HZ     60000UL
 #define STEPPER_DEFAULT_FREQ_HZ 9000UL
+/* 启动时先低频拉起, 再爬升到目标频率, 降低失步和灌流冲击。 */
 #define STEPPER_START_FREQ_HZ   1000UL
 #define STEPPER_RAMP_STEPS      20U
 #define STEPPER_RAMP_DELAY_MS   2U
@@ -66,6 +68,7 @@ static StepperMotor stepper_motors[STEPPER_COUNT] = {
     {&htim4, TIM_CHANNEL_1, TIM4_DIR_GPIO_Port, TIM4_DIR_Pin, TIM4_MS1_GPIO_Port, TIM4_MS1_Pin, TIM4_MS2_GPIO_Port, TIM4_MS2_Pin, TIM4_EN_GPIO_Port, TIM4_EN_Pin, STEPPER_TIM234_CLK_HZ, STEPPER_DEFAULT_FREQ_HZ, STEPPER_DEFAULT_SUB, STEPPER_DEFAULT_DIR, 0},
 };
 
+/* 统一通过 USART1 返回上位机, 保持 D2OK/D2ERR 文本协议一致。 */
 static void Stepper_SendText(const char *text)
 {
     fifo_s_puts(&uart1_tx_fifo, (const uint8_t *)text, (uint16_t)strlen(text));
@@ -93,6 +96,7 @@ static uint8_t Stepper_IsDigits(const char *text)
     return 1;
 }
 
+/* 将上位机使用的 motor_id=1..4 映射到数组下标 0..3。 */
 static StepperMotor *Stepper_GetMotor(uint8_t motor_id)
 {
     if (motor_id < 1U || motor_id > STEPPER_COUNT) {
@@ -102,9 +106,7 @@ static StepperMotor *Stepper_GetMotor(uint8_t motor_id)
     return &stepper_motors[motor_id - 1U];
 }
 
-/*
- * 设置细分引脚。默认 64 细分, 用于低流量稳定灌流。
- */
+/* 获取某一路泵在 Flash 配置结构中的参数。 */
 static AppMotorConfig *Stepper_GetConfig(uint8_t motor_id)
 {
     if (motor_id < 1U || motor_id > STEPPER_COUNT) {
@@ -119,6 +121,10 @@ static uint8_t Stepper_IsValidSubdivision(uint8_t subdivision)
     return (subdivision == 8U || subdivision == 16U || subdivision == 32U || subdivision == 64U);
 }
 
+/*
+ * 按细分值设置 MS1/MS2。
+ * 更换驱动器时, 必须先核对这里的高低电平和驱动器细分表。
+ */
 static void Stepper_SetSubdivisionPins(StepperMotor *motor, uint8_t subdivision)
 {
     GPIO_PinState ms1 = GPIO_PIN_RESET;
@@ -159,6 +165,10 @@ static void Stepper_SetDirectionPin(StepperMotor *motor, uint8_t direction)
 /*
  * 将 Hz 频率换算成定时器 ARR/CCR, CCR 取 ARR 的一半形成 50% 占空比。
  */
+/*
+ * 将目标频率 Hz 应用到 PWM 定时器。
+ * ARR = timer_clock_hz / frequency_hz - 1, CCR 取一半得到 50% 占空比脉冲。
+ */
 static uint8_t Stepper_ApplyFrequencyHz(StepperMotor *motor, uint32_t frequency_hz)
 {
     uint32_t arr;
@@ -182,6 +192,10 @@ static uint8_t Stepper_ApplyFrequencyHz(StepperMotor *motor, uint32_t frequency_
 
 /*
  * 加减速过程, 减少灌流泵启动瞬间冲击和失步风险。
+ */
+/*
+ * 频率爬坡。
+ * 电机运行时分段改变频率, 未运行时直接设置目标频率。
  */
 static uint8_t Stepper_RampFrequencyHz(StepperMotor *motor, uint32_t target_hz)
 {
@@ -215,6 +229,7 @@ static uint8_t Stepper_RampFrequencyHz(StepperMotor *motor, uint32_t target_hz)
     return Stepper_ApplyFrequencyHz(motor, target_hz);
 }
 
+/* 启动单路泵: 先使能驱动器, 再启动 PWM, 最后爬升到目标频率。 */
 static void Stepper_StartMotor(uint8_t motor_id)
 {
     StepperMotor *motor = Stepper_GetMotor(motor_id);
@@ -238,6 +253,7 @@ static void Stepper_StartMotor(uint8_t motor_id)
     Stepper_SendText(result_code);
 }
 
+/* 停止单路泵: 停 PWM 后拉高 EN, 让驱动器失能并停止输出脉冲。 */
 static void Stepper_StopMotor(uint8_t motor_id)
 {
     StepperMotor *motor = Stepper_GetMotor(motor_id);
@@ -315,6 +331,11 @@ static void Stepper_StopAll(void)
     Stepper_SendText("D2OK:stopall\r\n");
 }
 
+/*
+ * 解析带路号的命令。
+ * 例如 freq3:9000 会解析出 name=freq, motor_id=3, value=9000。
+ * 如果命令没有路号, 默认 motor_id=1, 兼容旧版单路泵命令。
+ */
 static uint8_t Stepper_ParseIndexedCommand(const char *command, const char *name, uint8_t *motor_id, const char **value)
 {
     size_t name_len = strlen(name);
@@ -345,12 +366,14 @@ static uint8_t Stepper_ParseIndexedCommand(const char *command, const char *name
     return 1;
 }
 
+/* 处理 D2dirN:x@。修改 GPIO 方向后同步写入 AppConfig, 便于 D2save@ 持久化。 */
 static void Stepper_HandleDir(const char *command)
 {
     uint8_t motor_id;
     const char *value;
     int direction;
     StepperMotor *motor;
+    AppMotorConfig *cfg;
 
     if (!Stepper_ParseIndexedCommand(command, "dir", &motor_id, &value) || !Stepper_IsDigits(value)) {
         Stepper_SendInvalid();
@@ -370,16 +393,22 @@ static void Stepper_HandleDir(const char *command)
     }
 
     Stepper_SetDirectionPin(motor, (uint8_t)direction);
+    cfg = Stepper_GetConfig(motor_id);
+    if (cfg != NULL) {
+        cfg->direction = (uint8_t)direction;
+    }
     snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:dir%d:%d\r\n", motor_id, direction);
     Stepper_SendText(result_code);
 }
 
+/* 处理 D2subN:x@。只允许 8/16/32/64 四档, 默认推荐 64 细分用于稳定低流量灌流。 */
 static void Stepper_HandleSub(const char *command)
 {
     uint8_t motor_id;
     const char *value;
     int subdivision;
     StepperMotor *motor;
+    AppMotorConfig *cfg;
 
     if (!Stepper_ParseIndexedCommand(command, "sub", &motor_id, &value) || !Stepper_IsDigits(value)) {
         Stepper_SendInvalid();
@@ -399,16 +428,22 @@ static void Stepper_HandleSub(const char *command)
     }
 
     Stepper_SetSubdivisionPins(motor, (uint8_t)subdivision);
+    cfg = Stepper_GetConfig(motor_id);
+    if (cfg != NULL) {
+        cfg->subdivision = (uint8_t)subdivision;
+    }
     snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:sub%d:%d\r\n", motor_id, subdivision);
     Stepper_SendText(result_code);
 }
 
+/* 处理 D2freqN:x@。这里直接按 Hz 控制泵, 常用于 3000/6000/9000Hz 实验语义。 */
 static void Stepper_HandleFreq(const char *command)
 {
     uint8_t motor_id;
     const char *value;
     uint32_t frequency_hz;
     StepperMotor *motor;
+    AppMotorConfig *cfg;
 
     if (!Stepper_ParseIndexedCommand(command, "freq", &motor_id, &value) || !Stepper_IsDigits(value)) {
         Stepper_SendInvalid();
@@ -427,6 +462,10 @@ static void Stepper_HandleFreq(const char *command)
         return;
     }
 
+    cfg = Stepper_GetConfig(motor_id);
+    if (cfg != NULL) {
+        cfg->frequency_hz = frequency_hz;
+    }
     snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:freq%d:%luHz\r\n", motor_id, (unsigned long)frequency_hz);
     Stepper_SendText(result_code);
 }
@@ -460,6 +499,122 @@ static void Stepper_HandleStartStop(const char *command, uint8_t start)
 /*
  * D2 命令入口。支持 dirN:x, subN:x, freqN:x, startN, stopN, startall, stopall。
  */
+static uint8_t Stepper_ParseFloatPair(const char *value, float *first, float *second)
+{
+    char temp[64];
+    char *comma;
+
+    if (value == NULL || first == NULL || second == NULL || strlen(value) >= sizeof(temp)) {
+        return 0U;
+    }
+
+    strcpy(temp, value);
+    comma = strchr(temp, ',');
+    if (comma == NULL) {
+        return 0U;
+    }
+
+    *comma = '\0';
+    *first = (float)atof(temp);
+    *second = (float)atof(comma + 1);
+    return 1U;
+}
+
+/*
+ * 处理 D2flowcalN:k,b@。
+ * 线性关系为 frequency_hz = k * flow_ml_per_h + b。
+ * 每一路泵单独保存 k,b, 因为软管、泵头和背压会导致流量曲线不同。
+ */
+static void Stepper_HandleFlowCal(const char *command)
+{
+    uint8_t motor_id;
+    const char *value;
+    float k;
+    float b;
+    AppMotorConfig *cfg;
+
+    if (!Stepper_ParseIndexedCommand(command, "flowcal", &motor_id, &value) ||
+        !Stepper_ParseFloatPair(value, &k, &b)) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    if (k <= 0.0f) {
+        Stepper_SendText("D2ERR:flowcal:k\r\n");
+        return;
+    }
+
+    cfg = Stepper_GetConfig(motor_id);
+    if (cfg == NULL) {
+        Stepper_SendInvalid();
+        return;
+    }
+    cfg->flow_k = k;
+    cfg->flow_b = b;
+
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:flowcal%d:k=%.4f,b=%.4f\r\n", motor_id, k, b);
+    Stepper_SendText(result_code);
+}
+
+/*
+ * 处理 D2flowN:x@。
+ * 上位机发送 ml/h, 下位机按该路 k,b 换算 Hz 并应用到 PWM。
+ */
+static void Stepper_HandleFlow(const char *command)
+{
+    uint8_t motor_id;
+    const char *value;
+    float flow;
+    float freq_float;
+    uint32_t frequency_hz;
+    AppMotorConfig *cfg;
+    StepperMotor *motor;
+
+    if (!Stepper_ParseIndexedCommand(command, "flow", &motor_id, &value)) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    flow = (float)atof(value);
+    cfg = Stepper_GetConfig(motor_id);
+    motor = Stepper_GetMotor(motor_id);
+    if (cfg == NULL || motor == NULL || cfg->flow_k <= 0.0f) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    freq_float = cfg->flow_k * flow + cfg->flow_b;
+    if (freq_float < (float)STEPPER_MIN_FREQ_HZ || freq_float > (float)STEPPER_MAX_FREQ_HZ) {
+        Stepper_SendText("D2ERR:flow:freq_range\r\n");
+        return;
+    }
+
+    frequency_hz = (uint32_t)(freq_float + 0.5f);
+    if (!Stepper_RampFrequencyHz(motor, frequency_hz)) {
+        Stepper_SendText("D2ERR:flow:apply\r\n");
+        return;
+    }
+
+    cfg->frequency_hz = frequency_hz;
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:flow%d:%.4fmlh,%luHz\r\n", motor_id, flow, (unsigned long)frequency_hz);
+    Stepper_SendText(result_code);
+}
+
+static void Stepper_SendStatus(void)
+{
+    uint8_t i;
+    AppMotorConfig *cfg;
+
+    for (i = 1U; i <= STEPPER_COUNT; i++) {
+        cfg = Stepper_GetConfig(i);
+        snprintf(result_code, CMD_BUFFER_SIZE,
+                 "D2STATUS:%u,dir=%u,sub=%u,freq=%lu,k=%.4f,b=%.4f\r\n",
+                 i, cfg->direction, cfg->subdivision,
+                 (unsigned long)cfg->frequency_hz, cfg->flow_k, cfg->flow_b);
+        Stepper_SendText(result_code);
+    }
+}
+
 static void Stepper_SaveConfig(void)
 {
     if (AppConfig_Save() == HAL_OK) {
@@ -469,6 +624,10 @@ static void Stepper_SaveConfig(void)
     }
 }
 
+/*
+ * D2 命令入口。
+ * main.c 负责剥离 D2 前缀, 本函数只处理电机子命令。
+ */
 void ProcessD2Command(char *command)
 {
     size_t len;
@@ -485,6 +644,12 @@ void ProcessD2Command(char *command)
 
     if (strcmp(command, "save") == 0) {
         Stepper_SaveConfig();
+    } else if (strcmp(command, "status") == 0) {
+        Stepper_SendStatus();
+    } else if (strncmp(command, "flowcal", 7) == 0) {
+        Stepper_HandleFlowCal(command);
+    } else if (strncmp(command, "flow", 4) == 0) {
+        Stepper_HandleFlow(command);
     } else if (strncmp(command, "dir", 3) == 0) {
         Stepper_HandleDir(command);
     } else if (strncmp(command, "sub", 3) == 0) {
@@ -526,7 +691,8 @@ void Stop_StepperMotor(void)
 }
 
 /*
- * 电机模块初始化: 四路默认 64 细分、9000Hz、停止状态。
+ * 电机模块初始化。
+ * 上电时设置细分、方向、频率, 最后保证 EN 失能和 PWM 停止。
  */
 void StepperMotor_Init(void)
 {
