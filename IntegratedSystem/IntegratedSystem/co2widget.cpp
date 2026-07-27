@@ -38,11 +38,11 @@ CO2CtrlWidget::CO2CtrlWidget(const QString &title, QWidget *parent)
     spinTargetCO2->setDecimals(0);
     spinTargetCO2->setValue(50000);
     spinTargetCO2->setSuffix(" ppm");
-    spinTargetCO2->setFixedWidth(110);
-    btnSetTarget = new QPushButton("Set Target");
+    spinTargetCO2->setFixedWidth(135);
+    btnSetTarget = new QPushButton("设置目标");
     btnSetTarget->setFixedHeight(30);
     targetLayout->addStretch();
-    targetLayout->addWidget(new QLabel("??:"));
+    targetLayout->addWidget(new QLabel("目标浓度:"));
     targetLayout->addWidget(spinTargetCO2);
     targetLayout->addWidget(btnSetTarget);
     targetLayout->addStretch();
@@ -81,7 +81,7 @@ CO2CtrlWidget::CO2CtrlWidget(const QString &title, QWidget *parent)
     QHBoxLayout *piLayout = new QHBoxLayout();
     spinP = new QDoubleSpinBox(); spinP->setRange(-100, 100); spinP->setDecimals(2); spinP->setSingleStep(0.1);
     spinI = new QDoubleSpinBox(); spinI->setRange(-100, 100); spinI->setDecimals(2); spinI->setSingleStep(0.01);
-    spinP->setFixedWidth(70); spinI->setFixedWidth(70);
+    spinP->setFixedWidth(86); spinI->setFixedWidth(86);
 
     btnSetPI = new QPushButton("设置PI");
 
@@ -226,7 +226,7 @@ void CO2Widget::initChart()
     labelSeriesCO2->setPen(QPen(Qt::transparent));
     labelSeriesCO2->setBrush(QBrush(Qt::transparent));
     labelSeriesCO2->setPointLabelsVisible(true);
-    labelSeriesCO2->setPointLabelsFormat("                  50000ppm"); // 留出空格防止贴边
+    labelSeriesCO2->setPointLabelsFormat("                  50000 ppm"); // 留出空格防止贴边
     labelSeriesCO2->setPointLabelsColor(QColor("#FF9800"));
     labelSeriesCO2->setPointLabelsFont(QFont("Arial", 10, QFont::Bold));
     chartCO2->addSeries(labelSeriesCO2);
@@ -434,6 +434,7 @@ void CO2Widget::handleSerialFrame(const QString &prefix, const QString &line)
         QRegularExpressionMatch match = rx.match(line);
         if (match.hasMatch()) {
             m_targetCO2 = match.captured(1).toDouble();
+            labelSeriesCO2->setPointLabelsFormat(QString("                  %1 ppm").arg(m_targetCO2, 0, 'f', 0));
             appendLog(QString("CO2 target updated: %1 ppm").arg(m_targetCO2, 0, 'f', 0));
         }
     }

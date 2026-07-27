@@ -52,15 +52,15 @@ TempCtrlWidget::TempCtrlWidget(const QString &title, const QString &prefix, QWid
 
     // --- 第三行：PID ---
     QHBoxLayout *pidLayout = new QHBoxLayout();
-    spinP = new QDoubleSpinBox(); spinP->setRange(0, 1000); spinP->setValue(10.0);
-    spinI = new QDoubleSpinBox(); spinI->setRange(0, 1000); spinI->setValue(0.5);
-    spinD = new QDoubleSpinBox(); spinD->setRange(0, 1000); spinD->setValue(1.0);
-    int pidBoxWidth = 55;
+    spinP = new QDoubleSpinBox(); spinP->setRange(0, 1000); spinP->setDecimals(2); spinP->setValue(10.0);
+    spinI = new QDoubleSpinBox(); spinI->setRange(0, 1000); spinI->setDecimals(2); spinI->setValue(0.5);
+    spinD = new QDoubleSpinBox(); spinD->setRange(0, 1000); spinD->setDecimals(2); spinD->setValue(1.0);
+    int pidBoxWidth = 82;
     spinP->setFixedWidth(pidBoxWidth); spinI->setFixedWidth(pidBoxWidth); spinD->setFixedWidth(pidBoxWidth);
-    spinP->setFixedHeight(22); spinI->setFixedHeight(22); spinD->setFixedHeight(22);
+    spinP->setFixedHeight(26); spinI->setFixedHeight(26); spinD->setFixedHeight(26);
     btnSetPID = new QPushButton("设置PID");
-    btnSetPID->setFixedWidth(70);
-    btnSetPID->setFixedHeight(22);
+    btnSetPID->setFixedWidth(78);
+    btnSetPID->setFixedHeight(26);
     pidLayout->addStretch();
     pidLayout->addWidget(new QLabel("P")); pidLayout->addWidget(spinP); pidLayout->addSpacing(15);
     pidLayout->addWidget(new QLabel("I")); pidLayout->addWidget(spinI); pidLayout->addSpacing(15);
