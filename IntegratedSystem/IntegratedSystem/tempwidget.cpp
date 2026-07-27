@@ -460,13 +460,30 @@ void TempWidget::handleSerialFrame(const QString &prefix, const QString &line)
         return;
     }
 
-    if (line.startsWith("CMD") || line.contains("Error")) {
+    if (line.startsWith("CMD") || line.contains("Error") || line.contains("ERR:")) {
         appendLog("Error: " + line);
         return;
     }
 
+    QString channel = prefix;
+    QString valueText = line;
+    const int colonIndex = line.indexOf(':');
+    if (colonIndex > 0) {
+        const QString head = line.left(colonIndex);
+        valueText = line.mid(colonIndex + 1).trimmed();
+        if (head.startsWith("D0")) {
+            channel = "D0";
+        } else if (head.startsWith("D1")) {
+            channel = "D1";
+        }
+    }
+
+    if (line.contains("TEMP:")) {
+        valueText = line.mid(line.indexOf("TEMP:") + 5).trimmed();
+    }
+
     bool ok = false;
-    double tempVal = line.toDouble(&ok);
+    double tempVal = valueText.toDouble(&ok);
     if (!ok) {
         return;
     }
@@ -481,14 +498,14 @@ void TempWidget::handleSerialFrame(const QString &prefix, const QString &line)
     QDateTime minTime = QDateTime::fromMSecsSinceEpoch(minXMs);
     QDateTime maxTime = QDateTime::fromMSecsSinceEpoch(maxXMs);
 
-    if (m_pollingState == 1 || prefix == "D0") {
+    if (channel == "D0") {
         internalTempWidget->updateCurrentTempDisplay(tempVal);
         seriesInt->append(currentMs, tempVal);
         axisXInt->setRange(minTime, maxTime);
         seriesTargetInt->replace(QList<QPointF>() << QPointF(minXMs, 37.0) << QPointF(maxXMs, 37.0));
         labelSeriesInt->replace(QList<QPointF>() << QPointF(minXMs, 37.0));
         if (seriesInt->count() > 4000) seriesInt->removePoints(0, 100);
-    } else {
+    } else if (channel == "D1") {
         externalTempWidget->updateCurrentTempDisplay(tempVal);
         seriesExt->append(currentMs, tempVal);
         axisXExt->setRange(minTime, maxTime);

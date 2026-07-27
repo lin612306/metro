@@ -1,1154 +1,381 @@
-#include "stm32f4xx.h"                  // Device header
-#include "stm32f4xx_hal.h"              // HAL header for GPIO definitions
 #include "MY_Temper.h"
+#include <stdarg.h>
 
+#define TEMP_REPLY_TIMEOUT_MS 200U
+#define TEMP_TX_TIMEOUT_MS    200U
 
-void ProcessD0Command(char* command)
+typedef struct
 {
-    size_t command_len = strlen(command);      // 获取命令的长度
+    TempChannelId id;
+    const char *prefix;          /* 上位机协议前缀: D0/D1 */
+    const char *name;            /* 通道名称 */
+    fifo_s *rx_fifo;             /* 温控器接收 FIFO */
+    fifo_s *tx_fifo;             /* 温控器发送 FIFO */
+    AppTempConfig *config;       /* 掉电保存参数 */
+} TempController;
 
-    // 如果最后一个字符是'@'，去掉它
-    if (command[command_len - 1] == '@') 
-    {
-        command[command_len - 1] = '\0';
-        command_len--;
-    }
+static TempController Temp_GetController(TempChannelId id)
+{
+    AppConfig *cfg = AppConfig_Mutable();
 
-    // 查找命令中的冒号分隔符
-    char *colon_ptr = strchr(command, ':');
-    char prefix[64];  // 用于存储命令前缀
-    
-    if (colon_ptr != NULL)
-    {
-        // 提取命令的前缀
-        size_t prefix_len = colon_ptr - command;
-        strncpy(prefix, command, prefix_len);
-        prefix[prefix_len] = '\0';
-    }
-    else
-    {
-        // 如果没有冒号，前缀就是整个命令
-        strcpy(prefix, command);
+    if (id == TEMP_CHANNEL_EXTERNAL) {
+        TempController controller = {
+            TEMP_CHANNEL_EXTERNAL,
+            "D1",
+            "external",
+            &uart2_rx_fifo,
+            &uart2_tx_fifo,
+            &cfg->d1_temp
+        };
+        return controller;
     }
 
-    // 判断命令前缀并调用对应的函数
-    if (strcmp(prefix, "settemp") == 0)
     {
-        SetTemperature(command);  // 设置温度命令
-    }
-    else if (strcmp(prefix, "gettemp") == 0)
-    {
-        GetCurrentTemperature(command);  // 获取当前温度命令
-    }
-    else if (strcmp(prefix, "setspeed") == 0)
-    {
-        SetSpeed(command);  // 设置速度命令
-    }
-    else if (strcmp(prefix, "setp") == 0)
-    {
-        SetP(command);  // 设置PID的P参数命令
-    }
-    else if (strcmp(prefix, "seti") == 0)
-    {
-        SetI(command);  // 设置PID的I参数命令
-    }
-    else if (strcmp(prefix, "setd") == 0)
-    {
-        SetD(command);  // 设置PID的D参数命令
-    }
-    else if (strcmp(prefix, "pidmode") == 0)
-    {
-        PidMode(command);  // 设置PID模式命令
-    }
-    else if (strcmp(prefix, "lock") == 0)
-    {
-        Lock(command);  // 锁定命令
-    }
-    else if (strcmp(prefix, "unlock") == 0)
-    {
-        Unlock(command);  // 解锁命令
-    }
-    else
-    {
-        // 处理无效命令
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t *)result_code, strlen(result_code));
-        send_data_from_tx_fifo();
+        TempController controller = {
+            TEMP_CHANNEL_INTERNAL,
+            "D0",
+            "internal",
+            &uart3_rx_fifo,
+            &uart3_tx_fifo,
+            &cfg->d0_temp
+        };
+        return controller;
     }
 }
 
-
-
-
-
-static void ProcessResponse(uint8_t *response, uint32_t length) 
+static void Temp_SendToHost(const TempController *controller, const char *format, ...)
 {
-    // 检查响应长度
-    if (length == 0)
-    {
-        char message[] = "NoResponse\r\n";
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t *)message, strlen(message));
-        send_data_from_tx_fifo();
+    va_list args;
+
+    va_start(args, format);
+    vsnprintf(result_code, CMD_BUFFER_SIZE, format, args);
+    va_end(args);
+
+    fifo_s_puts(&uart1_tx_fifo, (uint8_t *)result_code, strlen(result_code));
+    send_data_from_tx_fifo();
+}
+
+static int Temp_IsNumber(const char *text)
+{
+    uint8_t has_digit = 0U;
+    uint8_t has_dot = 0U;
+
+    if (text == NULL || *text == '\0') {
+        return 0;
+    }
+
+    if (*text == '-' || *text == '+') {
+        text++;
+    }
+
+    while (*text != '\0') {
+        if (isdigit((unsigned char)*text)) {
+            has_digit = 1U;
+        } else if (*text == '.' && has_dot == 0U) {
+            has_dot = 1U;
+        } else {
+            return 0;
+        }
+        text++;
+    }
+
+    return has_digit != 0U;
+}
+
+static int Temp_ParseValue(char *command, const char **value)
+{
+    char *colon = strchr(command, ':');
+
+    if (colon == NULL || colon[1] == '\0') {
+        return 0;
+    }
+
+    *value = colon + 1;
+    return Temp_IsNumber(*value);
+}
+
+static void Temp_StripFrameEnd(char *command)
+{
+    size_t len;
+
+    if (command == NULL) {
         return;
     }
 
-    // 检查是否为 CMD:REPLY= 格式的响应
-    if (strncmp((char*)response, "CMD:REPLY=", 10) == 0) 
-    {
-        // 提取错误码（应该是数字字符）
-        if (length < 11)
-        {
-            char message[] = "InvalidResponse\r\n";
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t *)message, strlen(message));
-            send_data_from_tx_fifo();
-            return;
-        }
-        
-        // 提取错误码数字
-        int error_code = atoi((char*)&response[10]);
-        
-        // 根据协议文档中的错误码定义处理响应
-        char message[100];
-
-        switch (error_code) 
-        {
-            case 0:
-                strcpy(message, "错误:未找到子模块名称或参数名称\r\n");
-                break;
-            case 1:
-                strcpy(message, "设定命令执行成功\r\n");
-                break;
-            case 2:
-                strcpy(message, "错误:未找到参数名称\r\n");
-                break;
-            case 3:
-                strcpy(message, "错误:命令被禁止\r\n");
-                break;
-            case 4:
-                strcpy(message, "错误:参数值超出范围\r\n");
-                break;
-            case 5:
-                strcpy(message, "错误:其它或未知错误\r\n");
-                break;
-            case 6:
-                strcpy(message, "错误:命令格式语法错误\r\n");
-                break;
-            case 7:
-                strcpy(message, "错误:校验错误\r\n");
-                break;
-            case 8:
-                strcpy(message, "保存命令执行成功\r\n");
-                break;
-            default:
-                sprintf(message, "未知错误码:%d\r\n", error_code);
-                break;
-        }
-
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t *)message, strlen(message));
-        send_data_from_tx_fifo();
-        return;
-    }
-    else 
-    {
-        // 其他响应直接转发给上位机
-        
-        // 添加回 \r\n 结束符（因为前面去掉了 \r）
-        char forward_message[CMD_BUFFER_SIZE + 2];
-        snprintf(forward_message, sizeof(forward_message), "%s\n", (char*)response);
-        
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t *)forward_message, strlen(forward_message));
-        send_data_from_tx_fifo();
-        return;
+    len = strlen(command);
+    if (len > 0U && command[len - 1U] == '@') {
+        command[len - 1U] = '\0';
     }
 }
 
-
-
-
-static int Temp_Send_SetLock(uint8_t *rx_buf, size_t buf_size, int *out_len, uint32_t timeout_ms)
+static void Temp_GetCommandName(char *command, char *name, size_t name_size)
 {
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0) 
-    return -2; 
+    char *colon = strchr(command, ':');
+    size_t len = (colon == NULL) ? strlen(command) : (size_t)(colon - command);
 
-    const char lock_command[] = "MEMORY:MEMWP=1\r";
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)lock_command, strlen(lock_command));
+    if (len >= name_size) {
+        len = name_size - 1U;
+    }
+
+    memcpy(name, command, len);
+    name[len] = '\0';
+}
+
+static int Temp_SendAndWait(const TempController *controller,
+                            const char *device_command,
+                            uint8_t *rx_buf,
+                            size_t rx_size,
+                            int *out_len,
+                            uint32_t timeout_ms)
+{
+    uint32_t start_time;
+    uint32_t tx_start;
+
+    if (controller == NULL || device_command == NULL || rx_buf == NULL ||
+        out_len == NULL || rx_size == 0U) {
+        return -2;
+    }
+
+    *out_len = 0;
+    fifo_s_puts(controller->tx_fifo, (const uint8_t *)device_command, strlen(device_command));
     send_data_from_tx_fifo();
 
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-        return -3;
+    tx_start = HAL_GetTick();
+    while (!fifo_s_is_empty(controller->tx_fifo)) {
+        if ((HAL_GetTick() - tx_start) > TEMP_TX_TIMEOUT_MS) {
+            return -3;
+        }
     }
-    
-    *out_len = 0;
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
 
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
+    start_time = HAL_GetTick();
+    while ((HAL_GetTick() - start_time) < timeout_ms) {
+        if (!fifo_s_is_empty(controller->rx_fifo)) {
+            fifo_s_get(controller->rx_fifo, &rx_buf[*out_len]);
+
+            if (rx_buf[*out_len] == '\r' || rx_buf[*out_len] == '\n') {
                 (*out_len)++;
                 break;
             }
 
             (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
-            start_time = HAL_GetTick();
-        }
-    }
-
-    if (*out_len == 0) 
-    return -1; // 超时/未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
-}
-
-
-
-
-/*
- * 功能: lock
- * 描述: 锁定温控器并设置写保护
- * 输入:
- *  - 命令 "D0lock@"
- *      - 锁定并设置保护
- */
-void Lock(char *command)
-{
-    uint8_t response1[CMD_BUFFER_SIZE];
-    int len1 = 0;
-    int ret;
-
-    // 1) 调用底层设定函数
-    ret = Temp_Send_SetLock(response1, sizeof(response1), &len1, 200);
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "SetError: %d\r\n",ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo();
-        return; // 设定阶段失败，则不上保存阶段
-    }
-    // 上层解析 response1
-    ProcessResponse(response1, len1);
-
-    // 清理缓冲区
-    memset(response1, 0, sizeof(response1));    
-}
-
-
-
-
-
-
-static int Temp_Send_SetUnlock(uint8_t *rx_buf, size_t buf_size, int *out_len, uint32_t timeout_ms)
-{
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0) 
-    return -2; // 参数错误
-
-    const char unlock_command[] = "MEMORY:MEMWP=0\r";
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)unlock_command, strlen(unlock_command));  
-    send_data_from_tx_fifo(); // 发送解锁命令
-
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-        return -3; 
-    }
-
-    *out_len = 0;
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
-
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
-                (*out_len)++;
+            if (*out_len >= (int)rx_size - 1) {
                 break;
             }
 
-            (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
             start_time = HAL_GetTick();
         }
     }
 
-    if (*out_len == 0) 
-    return -1; // 超时或未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
-}
-
-
-
-
-
-/*
- * 功能: unlock
- * 描述: 解锁并解除写保护
- * 输入:
- *  - 命令 "D0unlock@"
- *      - 解锁并解除写保护
- */
-void Unlock(char *command)
-{
-    uint8_t response1[CMD_BUFFER_SIZE] = {0};
-    int len1 = 0;
-    int ret;
-
-    // 1) 调用底层解锁设置命令
-    ret = Temp_Send_SetUnlock(response1, sizeof(response1), &len1, 200);
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "SetUnlockError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return; // 解锁设置失败，则不上保存
+    if (*out_len == 0) {
+        return -1;
     }
 
-    // 上层解析第一个响应
-    ProcessResponse(response1, len1);
-
-    // 清理缓冲区
-    memset(response1, 0, sizeof(response1));    
+    rx_buf[*out_len] = '\0';
+    return 0;
 }
 
-
-
-
-
-static int Temp_Send_SetTemp(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *temperature, uint32_t timeout_ms)
+static void Temp_BuildDeviceCommand(char *out, size_t out_size, const char *key, const char *value)
 {
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0 || temperature == NULL) 
-    return -2; // 参数错误
+    if (value == NULL) {
+        snprintf(out, out_size, "%s\r", key);
+    } else {
+        snprintf(out, out_size, "%s%s\r", key, value);
+    }
+}
 
-    // 构建命令： "TC1:TCADJTEMP=X"
-    char command_to_temp[50] = "TC1:TCADJTEMP=";
-    strcat(command_to_temp, temperature);
-    strcat(command_to_temp, "\r");
+static float Temp_ExtractFloat(const uint8_t *response, int len, int *ok)
+{
+    char buf[CMD_BUFFER_SIZE];
+    char *scan;
+    char *endptr;
+    float value;
 
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)command_to_temp, strlen(command_to_temp));  
-    send_data_from_tx_fifo(); 
-
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-        return -3; 
+    *ok = 0;
+    if (response == NULL || len <= 0) {
+        return 0.0f;
     }
 
-    *out_len = 0;
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
+    if (len >= CMD_BUFFER_SIZE) {
+        len = CMD_BUFFER_SIZE - 1;
+    }
 
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
-                (*out_len)++;
-                break;
+    memcpy(buf, response, (size_t)len);
+    buf[len] = '\0';
+
+    scan = buf;
+    while (*scan != '\0') {
+        if ((*scan >= '0' && *scan <= '9') || *scan == '-' || *scan == '+') {
+            value = (float)strtod(scan, &endptr);
+            if (endptr != scan) {
+                *ok = 1;
+                return value;
             }
-
-            (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
-            start_time = HAL_GetTick();
         }
+        scan++;
     }
 
-    if (*out_len == 0) 
-    return -1; // 超时或未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
+    return 0.0f;
 }
 
-
-
-/* 
-* 功能: SetTemperature 
-* 描述: 设置温控器的温度 
-* 输入: * - 命令 "D0settemp:X@" 
-* - X 是温度值，例如 "37" 表示设置温度为37℃ 
-*/
-void SetTemperature(char* command)
+static void Temp_HandleDeviceAck(const TempController *controller,
+                                 const uint8_t *response,
+                                 int len,
+                                 const char *action)
 {
-    char *colon_pos = strchr(command, ':');
-    if (!colon_pos)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
+    int error_code;
+
+    if (len <= 0) {
+        Temp_SendToHost(controller, "%sERR:%s:no_response\r\n", controller->prefix, action);
         return;
     }
 
-    char *temperature_str = colon_pos + 1;
+    if (strncmp((const char *)response, "CMD:REPLY=", 10) == 0) {
+        error_code = atoi((const char *)&response[10]);
+        if (error_code == 1 || error_code == 8) {
+            Temp_SendToHost(controller, "%sOK:%s\r\n", controller->prefix, action);
+        } else {
+            Temp_SendToHost(controller, "%sERR:%s:code%d\r\n", controller->prefix, action, error_code);
+        }
+        return;
+    }
 
-    // 检查数字格式
-    int has_digit = 0, has_dot = 0;
-    for (int i = 0; i < strlen(temperature_str); i++)
-    {
-        if (isdigit(temperature_str[i])) 
-            has_digit = 1;
-        else if (temperature_str[i] == '.' && !has_dot) 
-            has_dot = 1;
-        else
-        {
-            strcpy(result_code, "InvalidCommand\r\n");
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-            send_data_from_tx_fifo(); 
+    Temp_SendToHost(controller, "%sOK:%s\r\n", controller->prefix, action);
+}
+
+static void Temp_SetDeviceValue(const TempController *controller,
+                                char *command,
+                                const char *device_key,
+                                const char *action,
+                                float *config_value)
+{
+    const char *value;
+    char device_command[64];
+    uint8_t response[CMD_BUFFER_SIZE];
+    int response_len = 0;
+    int ret;
+
+    if (!Temp_ParseValue(command, &value)) {
+        Temp_SendToHost(controller, "%sERR:%s:bad_value\r\n", controller->prefix, action);
+        return;
+    }
+
+    Temp_BuildDeviceCommand(device_command, sizeof(device_command), device_key, value);
+    ret = Temp_SendAndWait(controller, device_command, response, sizeof(response),
+                           &response_len, TEMP_REPLY_TIMEOUT_MS);
+    if (ret != 0) {
+        Temp_SendToHost(controller, "%sERR:%s:timeout%d\r\n", controller->prefix, action, ret);
+        return;
+    }
+
+    if (config_value != NULL) {
+        *config_value = (float)strtod(value, NULL);
+    }
+
+    Temp_HandleDeviceAck(controller, response, response_len, action);
+}
+
+static void Temp_ProcessCommand(TempChannelId id, char *command)
+{
+    TempController controller = Temp_GetController(id);
+    char name[32];
+
+    Temp_StripFrameEnd(command);
+    Temp_GetCommandName(command, name, sizeof(name));
+
+    if (strcmp(name, "gettemp") == 0) {
+        uint8_t response[CMD_BUFFER_SIZE];
+        int response_len = 0;
+        int ret;
+        int ok = 0;
+        float temp;
+
+        ret = Temp_SendAndWait(&controller, "TC1:TCACTTEMP?\r", response, sizeof(response),
+                               &response_len, TEMP_REPLY_TIMEOUT_MS);
+        if (ret != 0) {
+            Temp_SendToHost(&controller, "%sERR:gettemp:timeout%d\r\n", controller.prefix, ret);
             return;
         }
-    }
-    if (!has_digit)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
 
-    uint8_t response1[CMD_BUFFER_SIZE] = {0};
-    int len1 = 0;
-    int ret;
-
-    // 传递温度值给底层函数
-    ret = Temp_Send_SetTemp(response1, sizeof(response1), &len1, temperature_str, 200);
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "SetTempError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    // 上层解析响应
-    ProcessResponse(response1, len1);
-
-    // 清理缓冲区
-    memset(response1, 0, sizeof(response1));
-}
-
-
-
-
-
-static int Temp_Send_GetTemp(uint8_t *rx_buf, size_t buf_size, int *out_len, uint32_t timeout_ms)
-{
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0) 
-    return -2; // 参数错误
-
-    const char command_to_temp[] = "TC1:TCACTTEMP?\r";
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)command_to_temp, strlen(command_to_temp));
-    send_data_from_tx_fifo();
-
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-        return -3; 
-    }
-
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
-
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
-                (*out_len)++;
-                break;
-            }
-
-            (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
-            start_time = HAL_GetTick();
+        temp = Temp_ExtractFloat(response, response_len, &ok);
+        if (ok) {
+            Temp_SendToHost(&controller, "%sTEMP:%.2f\r\n", controller.prefix, temp);
+        } else {
+            Temp_SendToHost(&controller, "%sRAW:%s\r\n", controller.prefix, response);
         }
-    }
-
-    if (*out_len == 0) 
-    return -1; // 超时或未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
-}
-
-
-
-
-
-/*
- * 功能: GetCurrentTemperature
- * 描述: 获取当前温控器的温度
- * 输入:
- *  - 命令 "D0gettemp@"
- */
-void GetCurrentTemperature(char* command)
-{
-    uint8_t response[CMD_BUFFER_SIZE] = {0};
-    int len = 0;
-    int ret;
-
-    // 1) 调用底层函数获取当前温度
-    ret = Temp_Send_GetTemp(response, sizeof(response), &len, 200);
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "GetTempError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo();
-        return; // 获取温度失败，不处理响应
-    }
-
-    // 2) 调用统一的响应处理函数
-    ProcessResponse(response, len);
-
-    // 3) 清理缓冲区
-    memset(response, 0, sizeof(response));
-}
-
-
-
-
-
-static int Temp_Send_SetSpeed(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *speed, uint32_t timeout_ms)
-{
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0 || speed == NULL) 
-    return -2; // 参数错误
-
-    // 构建命令： "TC1:TCRAMPSPEED=X"
-    char command_to_speed[50] = "TC1:TCRAMPSPEED=";
-    strcat(command_to_speed, speed);
-    strcat(command_to_speed, "\r");
-
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)command_to_speed, strlen(command_to_speed)); 
-    send_data_from_tx_fifo(); 
-
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-        return -3; 
-    }
-
-    *out_len = 0;
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
-
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
-                (*out_len)++;
-                break;
-            }
-
-            (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
-            start_time = HAL_GetTick();
+    } else if (strcmp(name, "settemp") == 0) {
+        Temp_SetDeviceValue(&controller, command, "TC1:TCADJTEMP=", "settemp", &controller.config->target_temp);
+    } else if (strcmp(name, "setspeed") == 0) {
+        Temp_SetDeviceValue(&controller, command, "TC1:TCRAMPSPEED=", "setspeed", NULL);
+    } else if (strcmp(name, "pidmode") == 0) {
+        Temp_SetDeviceValue(&controller, command, "TC1:TCPIDTYPE=", "pidmode", NULL);
+    } else if (strcmp(name, "setp") == 0) {
+        Temp_SetDeviceValue(&controller, command, "TC1:TCPIDP=", "setp", &controller.config->kp);
+    } else if (strcmp(name, "seti") == 0) {
+        Temp_SetDeviceValue(&controller, command, "TC1:TCPIDTI=", "seti", &controller.config->ki);
+    } else if (strcmp(name, "setd") == 0) {
+        Temp_SetDeviceValue(&controller, command, "TC1:TCPIDTD=", "setd", &controller.config->kd);
+    } else if (strcmp(name, "lock") == 0) {
+        uint8_t response[CMD_BUFFER_SIZE];
+        int response_len = 0;
+        int ret = Temp_SendAndWait(&controller, "MEMORY:MEMWP=1\r", response, sizeof(response),
+                                   &response_len, TEMP_REPLY_TIMEOUT_MS);
+        if (ret != 0) {
+            Temp_SendToHost(&controller, "%sERR:lock:timeout%d\r\n", controller.prefix, ret);
+        } else {
+            Temp_HandleDeviceAck(&controller, response, response_len, "lock");
         }
-    }
-
-    if (*out_len == 0) 
-    return -1; // 超时或未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
-}
-
-
-
-
-/*
- * 功能: SetSpeed
- * 描述: 设置温控器的速度
- * 输入:
- *  - 命令 "D0setspeed:X@"
- *      - X 是速度值，例如 "0.1" 表示设置速度为0.1
- */
-void SetSpeed(char* command)
-{
-    char *colon_pos = strchr(command, ':');
-    if (!colon_pos)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    char *speed_str = colon_pos + 1;
-
-    // 检查是否为数字或小数点
-    for (int i = 0; i < strlen(speed_str); i++)
-    {
-        if (!isdigit(speed_str[i]) && speed_str[i] != '.')
-        {
-            strcpy(result_code, "InvalidCommand\r\n");
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-            send_data_from_tx_fifo(); 
-            return;
+    } else if (strcmp(name, "unlock") == 0) {
+        uint8_t response[CMD_BUFFER_SIZE];
+        int response_len = 0;
+        int ret = Temp_SendAndWait(&controller, "MEMORY:MEMWP=0\r", response, sizeof(response),
+                                   &response_len, TEMP_REPLY_TIMEOUT_MS);
+        if (ret != 0) {
+            Temp_SendToHost(&controller, "%sERR:unlock:timeout%d\r\n", controller.prefix, ret);
+        } else {
+            Temp_HandleDeviceAck(&controller, response, response_len, "unlock");
         }
-    }
-
-    uint8_t response1[CMD_BUFFER_SIZE] = {0};
-    int len1 = 0;
-    int ret;
-
-    // 传递速度值给底层函数
-    ret = Temp_Send_SetSpeed(response1, sizeof(response1), &len1, speed_str, 200);
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "SetSpeedError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    // 上层解析响应
-    ProcessResponse(response1, len1);
-
-    // 清理缓冲区
-    memset(response1, 0, sizeof(response1));
-}
-
-
-
-
-
-static int Temp_Send_SetPidMode(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *mode, uint32_t timeout_ms)
-{
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0 || mode == NULL) 
-        return -2; // 参数错误
-
-    // 构建命令： "TC1:TCPIDTYPE=X"
-    char command_to_pid[50] = "TC1:TCPIDTYPE=";
-    strcat(command_to_pid, mode);
-    strcat(command_to_pid, "\r");
-
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)command_to_pid, strlen(command_to_pid));
-    send_data_from_tx_fifo();  // 发送命令
-
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-            return -4; 
-    }
-
-    *out_len = 0;
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
-
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
-                (*out_len)++;
-                break;
-            }
-
-            (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
-            start_time = HAL_GetTick();
+    } else if (strcmp(name, "startctrl") == 0) {
+        Temp_SendToHost(&controller, "%sOK:startctrl\r\n", controller.prefix);
+    } else if (strcmp(name, "stopctrl") == 0) {
+        Temp_SendToHost(&controller, "%sOK:stopctrl\r\n", controller.prefix);
+    } else if (strcmp(name, "startAT") == 0) {
+        Temp_SendToHost(&controller, "%sERR:startAT:unsupported\r\n", controller.prefix);
+    } else if (strcmp(name, "save") == 0) {
+        if (AppConfig_Save() == HAL_OK) {
+            Temp_SendToHost(&controller, "%sOK:save\r\n", controller.prefix);
+        } else {
+            Temp_SendToHost(&controller, "%sERR:save\r\n", controller.prefix);
         }
+    } else if (strcmp(name, "getcfg") == 0) {
+        Temp_SendToHost(&controller, "%sCFG:target=%.2f,Kp=%.3f,Ki=%.3f,Kd=%.3f\r\n",
+                        controller.prefix,
+                        controller.config->target_temp,
+                        controller.config->kp,
+                        controller.config->ki,
+                        controller.config->kd);
+    } else {
+        Temp_SendToHost(&controller, "%sERR:invalid\r\n", controller.prefix);
     }
-
-    if (*out_len == 0) 
-        return -1; // 超时或未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
 }
 
-
-/*
- * 功能: PidMode
- * 描述: 设置PID控制器模式
- * 输入:
- *  - 命令 "D0pidmode:X@"
- *      - 0 代表 "P" 模式
- *      - 1 代表 "PI" 模式
- *      - 2 代表 "PID" 模式
- */
-void PidMode(char* command)
+void ProcessD0Command(char *command)
 {
-    char *colon_pos = strchr(command, ':');
-    if (colon_pos == NULL)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    char *mode_str = colon_pos + 1;
-
-    // 检查模式是否合法
-    if (strcmp(mode_str, "0") != 0 && strcmp(mode_str, "1") != 0 && strcmp(mode_str, "2") != 0)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    uint8_t response1[CMD_BUFFER_SIZE] = {0};
-    int len1 = 0;
-    int ret;
-
-    // 传递模式值给底层函数
-    ret = Temp_Send_SetPidMode(response1, sizeof(response1), &len1, mode_str, 200); // 200ms超时
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "SetPidModeError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    // 上层解析响应
-    ProcessResponse(response1, len1);
-
-    // 清理缓冲区
-    memset(response1, 0, sizeof(response1));
+    Temp_ProcessCommand(TEMP_CHANNEL_INTERNAL, command);
 }
 
-
-
-
-
-static int Temp_Send_SetP(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *p_value, uint32_t timeout_ms)
+void ProcessD1TempCommand(char *command)
 {
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0 || p_value == NULL) 
-        return -2; // 参数错误
-
-    // 构建命令： "TC1:TCPIDP=X"
-    char command_to_p[50] = "TC1:TCPIDP=";
-    strcat(command_to_p, p_value);
-    strcat(command_to_p, "\r");
-
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)command_to_p, strlen(command_to_p)); 
-    send_data_from_tx_fifo();  
-
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-            return -4; 
-    }
-
-    *out_len = 0;
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
-
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
-                (*out_len)++;
-                break;
-            }
-
-            (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
-            start_time = HAL_GetTick();
-        }
-    }
-
-    if (*out_len == 0) 
-        return -1; // 超时或未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
+    Temp_ProcessCommand(TEMP_CHANNEL_EXTERNAL, command);
 }
-
-
-
-
-
-
-/*
- * 功能: SetP
- * 描述: 设置PID控制器的P参数
- * 输入:
- *  - 命令 "D0setp:X"
- *      - X 是P参数值
- */
-void SetP(char* command)
-{
-    char *colon_pos = strchr(command, ':');
-    if (colon_pos == NULL)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    char *p_value_str = colon_pos + 1;
-
-    // 检查是否是数字
-    int has_digit = 0, has_dot = 0;
-    for (int i = 0; i < strlen(p_value_str); i++)
-    {
-        if (isdigit(p_value_str[i])) 
-            has_digit = 1;
-        else if (p_value_str[i] == '.' && !has_dot) 
-            has_dot = 1;
-        else
-        {
-            strcpy(result_code, "InvalidCommand\r\n");
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-            send_data_from_tx_fifo(); 
-            return;
-        }
-    }
-    if (!has_digit)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    uint8_t response1[CMD_BUFFER_SIZE] = {0};
-    int len1 = 0;
-    int ret;
-
-    // 传递 P 值给底层函数
-    ret = Temp_Send_SetP(response1, sizeof(response1), &len1, p_value_str, 200); // 200ms超时
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "SetPError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    // 上层解析响应
-    ProcessResponse(response1, len1);
-
-    // 清理缓冲区
-    memset(response1, 0, sizeof(response1));
-}
-
-
-
-
-
-
-static int Temp_Send_SetI(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *i_value, uint32_t timeout_ms)
-{
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0 || i_value == NULL) 
-        return -2; // 参数错误
-
-    // 构建命令： "TC1:TCPIDTI=X"
-    char command_to_i[50] = "TC1:TCPIDTI=";
-    strcat(command_to_i, i_value);
-    strcat(command_to_i, "\r");
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)command_to_i, strlen(command_to_i));  
-    send_data_from_tx_fifo();  
-
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-            return -4; 
-    }
-
-    *out_len = 0;
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
-
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
-                (*out_len)++;
-                break;
-            }
-
-            (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
-            start_time = HAL_GetTick();
-        }
-    }
-
-    if (*out_len == 0) 
-        return -1; // 超时或未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
-}
-
-
-
-
-
-
-/*
- * 函数名: SetI
- * 功能: 设置PID中的I参数
- * 参数:
- *    输入命令字符串: "D0seti:X"
- *      - X为I参数的值
- */
-void SetI(char* command)
-{
-    char *colon_pos = strchr(command, ':');
-    if (colon_pos == NULL)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    char *i_value_str = colon_pos + 1;
-
-    // 检查是否全是数字
-    int has_digit = 0, has_dot = 0;
-    for (int i = 0; i < strlen(i_value_str); i++)
-    {
-        if (isdigit(i_value_str[i])) 
-            has_digit = 1;
-        else if (i_value_str[i] == '.' && !has_dot) 
-            has_dot = 1;
-        else
-        {
-            strcpy(result_code, "InvalidCommand\r\n");
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-            send_data_from_tx_fifo(); 
-            return;
-        }
-    }
-    if (!has_digit)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-
-    uint8_t response1[CMD_BUFFER_SIZE] = {0};
-    int len1 = 0;
-    int ret;
-
-    // 传递 I 值给底层函数
-    ret = Temp_Send_SetI(response1, sizeof(response1), &len1, i_value_str, 200); // 200ms超时
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "SetIError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    // 上层解析响应
-    ProcessResponse(response1, len1);
-
-    // 清理缓冲区
-    memset(response1, 0, sizeof(response1));
-}
-
-
-
-
-
-
-static int Temp_Send_SetD(uint8_t *rx_buf, size_t buf_size, int *out_len, const char *d_value, uint32_t timeout_ms)
-{
-    if (rx_buf == NULL || out_len == NULL || buf_size == 0 || d_value == NULL) 
-        return -2; // 参数错误
-
-    // 构建命令： "TC1:TCPIDTD=X"
-    char command_to_d[50] = "TC1:TCPIDTD=";
-    strcat(command_to_d, d_value);
-    strcat(command_to_d, "\r");
-
-    fifo_s_puts(&uart3_tx_fifo, (uint8_t*)command_to_d, strlen(command_to_d));
-    send_data_from_tx_fifo();  
-
-    uint32_t tx_start = HAL_GetTick();
-    while (!fifo_s_is_empty(&uart3_tx_fifo))
-    {
-        if (HAL_GetTick() - tx_start > 200) // 超过200ms超时
-            return -3; 
-    }
-
-    *out_len = 0;
-    uint32_t start_time = HAL_GetTick();
-    while ((HAL_GetTick() - start_time) < timeout_ms)
-    {
-        if (!fifo_s_is_empty(&uart3_rx_fifo))  // 改成is_empty判断
-        {
-            fifo_s_get(&uart3_rx_fifo, &rx_buf[*out_len]);  // 取出1字节
-
-            // 检查是否为结束符
-            if (rx_buf[*out_len] == '\r')
-            {
-                (*out_len)++;
-                break;
-            }
-
-            (*out_len)++;
-            if (*out_len >= (int)buf_size - 1)
-                break; // 防止溢出
-
-            // 重置超时计时（只要有新数据）
-            start_time = HAL_GetTick();
-        }
-    }
-
-    if (*out_len == 0) 
-        return -1; // 超时或未收到数据
-    rx_buf[*out_len] = '\0'; // 添加字符串终止符
-    return 0; // 成功
-}
-
-
-
-
-
-
-
-/*
- * 函数名: SetD
- * 功能: 设置PID中的D参数
- * 参数:
- *    输入命令字符串: "D0setd:X"
- *      - X为D参数的值
- */
-void SetD(char* command)
-{
-    char *colon_pos = strchr(command, ':');
-    if (colon_pos == NULL)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    char *d_value_str = colon_pos + 1;
-
-    // 检查是否全是数字
-    int has_digit = 0, has_dot = 0;
-    for (int i = 0; i < strlen(d_value_str); i++)
-    {
-        if (isdigit(d_value_str[i])) 
-            has_digit = 1;
-        else if (d_value_str[i] == '.' && !has_dot) 
-            has_dot = 1;
-        else
-        {
-            strcpy(result_code, "InvalidCommand\r\n");
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-            send_data_from_tx_fifo(); 
-            return;
-        }
-    }
-    if (!has_digit)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-
-    uint8_t response1[CMD_BUFFER_SIZE] = {0};
-    int len1 = 0;
-    int ret;
-
-    // 传递 D 值给底层函数
-    ret = Temp_Send_SetD(response1, sizeof(response1), &len1, d_value_str, 200); // 200ms超时
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "SetDError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    // 上层解析响应
-    ProcessResponse(response1, len1);
-
-    // 清理缓冲区
-    memset(response1, 0, sizeof(response1));
-}
-
-
-
-
 
 void TemperatureSensor_Init(void)
 {
-    // 1. 设置温度为默认值
-    SetTemperature("settemp:37");
+    const AppConfig *cfg = AppConfig_Get();
+    char command[32];
 
-    // 2. 获取当前温度值
-    uint8_t response[CMD_BUFFER_SIZE] = {0};
-    int len = 0;
-    int ret;
+    snprintf(command, sizeof(command), "settemp:%.1f", cfg->d0_temp.target_temp);
+    Temp_ProcessCommand(TEMP_CHANNEL_INTERNAL, command);
 
-    ret = Temp_Send_GetTemp(response, sizeof(response), &len, 200);
-    if (ret != 0)
-    {
-        snprintf(result_code, sizeof(result_code), "GetTempError: %d\r\n", ret);
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;  // 获取当前温度失败，退出
-    }
-
-    // 3. 打印
-    snprintf(result_code, sizeof(result_code), "Temperature Sensor Initialized successfully. Current Temperature: %s°C\r\n", response);
-    fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-    send_data_from_tx_fifo();
+    snprintf(command, sizeof(command), "settemp:%.1f", cfg->d1_temp.target_temp);
+    Temp_ProcessCommand(TEMP_CHANNEL_EXTERNAL, command);
 }
-

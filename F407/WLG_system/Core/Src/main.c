@@ -29,7 +29,6 @@
 #include "fifo.h"
 #include "uart_dma.h"
 #include "MY_Temper.h"
-#include "MY_TF.h"
 #include "MY_Step.h"
 #include "MY_CO2.h"
 #include "app_config.h"
@@ -84,7 +83,11 @@ void SystemClock_Config(void);
 /*
  * 函数: Processcommand
  * 功能: 从 USART1 接收 FIFO 中读取上位机命令, 以 @ 作为一帧命令结束符。
- * 分发: D0 温控, D1 数据/TF, D2 四路灌流电机, D3 CO2 模块。
+ * 硬件对应:
+ *  - D0: 内部培养液温控器, USART3, 目标 37.0 摄氏度。
+ *  - D1: 外部观察环境温控器, USART2, 目标 30.0 摄氏度。
+ *  - D2: 四路灌流泵/步进电机。
+ *  - D3: CO2 传感器和浓度控制。
  */
 void Processcommand(void)
 {
@@ -96,7 +99,7 @@ void Processcommand(void)
     {
         fifo_s_get(&uart1_rx_fifo, &byte);
 
-        /* 防止命令过长导致缓冲区溢出。 */
+        /* 命令过长时丢弃当前帧, 防止缓冲区溢出。 */
         if (cmd_len >= (sizeof(cmd_buf) - 1U))
         {
             cmd_len = 0;
@@ -111,16 +114,16 @@ void Processcommand(void)
             /* 按 D0/D1/D2/D3 前缀分发到对应模块。 */
             if (strncmp((char*)cmd_buf, "D0", 2) == 0)
             {
-                /* D0: 温控模块。 */
+                /* D0: 内部温控器, 通过 USART3 转发。 */
                 memmove(cmd_buf, cmd_buf + 2, strlen((char*)cmd_buf + 2) + 1);
                 ProcessD0Command(cmd_buf);
             }
-            // else if (strncmp((char*)cmd_buf, "D1", 2) == 0)
-            // {
-            //     /* D1: TF 数据读写, 目前保留。 */
-            //     memmove(cmd_buf, cmd_buf + 2, strlen((char*)cmd_buf + 2) + 1);
-            //     ProcessD1Command(cmd_buf);
-            // }
+            else if (strncmp((char*)cmd_buf, "D1", 2) == 0)
+            {
+                /* D1: 外部温控器, 通过 USART2 转发。 */
+                memmove(cmd_buf, cmd_buf + 2, strlen((char*)cmd_buf + 2) + 1);
+                ProcessD1TempCommand(cmd_buf);
+            }
             else if(strncmp((char*)cmd_buf, "D2", 2) == 0)
             {
                 /* D2: 四路灌流泵/步进电机模块。 */

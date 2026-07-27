@@ -1,44 +1,41 @@
-#ifndef __My_Temper_H
-#define __My_Temper_H
-
+#ifndef __MY_TEMPER_H
+#define __MY_TEMPER_H
 
 #include "dma.h"
 #include "usart.h"
 #include "gpio.h"
-#include "string.h"
-#include "stdio.h"
-#include  "ctype.h"
-#include "stdlib.h"
+#include "fifo.h"
+#include "uart_dma.h"
+#include "app_config.h"
 #include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdio.h>
+#include <ctype.h>
+#include <stdlib.h>
 
-#define CMD_BUFFER_SIZE  218       
-#define MODULENAME_SIZE  32        
-#define PARAMNAME_SIZE   32       
-#define PARAMVALUE_SIZE  32        
+#define CMD_BUFFER_SIZE  218
+#define MODULENAME_SIZE  32
+#define PARAMNAME_SIZE   32
+#define PARAMVALUE_SIZE  32
 
-extern char rx_buffer[CMD_BUFFER_SIZE];                 // UART接收到的命令
-extern char command_buffer[CMD_BUFFER_SIZE];             // 命令处理缓冲区
-extern uint32_t ReceiveLen;                               // 接收到的数据长度
-extern uint8_t command_received;                        // 该标志用于确定命令是否接收完毕
-extern char result_code[CMD_BUFFER_SIZE];               // 命令处理结果代码
-extern char module_name[MODULENAME_SIZE];              // 模块名称
-extern char param_name[PARAMNAME_SIZE];                 // 参数名称
-extern char param_value[PARAMVALUE_SIZE];               // 参数值
+typedef enum
+{
+    TEMP_CHANNEL_INTERNAL = 0,  /* D0: 内部培养液温控器, USART3, 目标 37.0 摄氏度 */
+    TEMP_CHANNEL_EXTERNAL = 1   /* D1: 外部观察环境温控器, USART2, 目标 30.0 摄氏度 */
+} TempChannelId;
 
+extern char rx_buffer[CMD_BUFFER_SIZE];
+extern char command_buffer[CMD_BUFFER_SIZE];
+extern uint32_t ReceiveLen;
+extern uint8_t command_received;
+extern char result_code[CMD_BUFFER_SIZE];
+extern char module_name[MODULENAME_SIZE];
+extern char param_name[PARAMNAME_SIZE];
+extern char param_value[PARAMVALUE_SIZE];
 
-void ProcessD0Command(char* command);
-void Lock(char* command);
-void Unlock(char* command);
-void SetTemperature(char* command);
-void GetCurrentTemperature(char* command);
-void SetSpeed(char* command);
-void PidMode(char* command);
-void SetP(char* command);
-void SetI(char* command);
-void SetD(char* command);
+void ProcessD0Command(char *command);
+void ProcessD1TempCommand(char *command);
 void TemperatureSensor_Init(void);
 
-
 #endif
-
-
