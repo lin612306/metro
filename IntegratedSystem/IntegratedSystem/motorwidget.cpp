@@ -225,6 +225,7 @@ void MotorWidget::createMotorPanel(int motorId, QWidget *parent, QGridLayout *ma
 
     // 绑定事件
     connect(btnSetDir, &QPushButton::clicked, this, [=](){ onSetDirClicked(motorId); });
+    connect(btnSetSub, &QPushButton::clicked, this, [=](){ onSetSubClicked(motorId); });
 
     // 流量改变时，实时更新频率和剪切力显示
     connect(flowSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -291,30 +292,12 @@ void MotorWidget::onFlowValueChanged(int motorId, double flowVal)
 // --- 全局启动 ---
 void MotorWidget::onGlobalStartClicked()
 {
-    // 定义指令之间的时间间隔 (单位：毫秒)
-    const int delayMs = 150;
-
-    logConsole->append(">>> 开始执行一键启动序列...");
-
-    // 使用 QTimer::singleShot 制造“排队”效果
-    for(int i=1; i<=4; i++) {
-        QTimer::singleShot((i-1) * delayMs, this, [=](){
-            onStartClicked(i);
-        });
-    }
+    sendCommand("D2startall@");
 }
 
 void MotorWidget::onGlobalStopClicked()
 {
-    const int delayMs = 150; // 同样使用 150ms 间隔
-
-    logConsole->append(">>> 开始执行一键停止序列...");
-
-    for(int i=1; i<=4; i++) {
-        QTimer::singleShot((i-1) * delayMs, this, [=](){
-            onStopClicked(i);
-        });
-    }
+    sendCommand("D2stopall@");
 }
 
 

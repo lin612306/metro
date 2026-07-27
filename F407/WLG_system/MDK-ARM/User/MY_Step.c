@@ -1,348 +1,484 @@
-#include "stm32f4xx.h"                  // Device header
-#include "stm32f4xx_hal.h"              // HAL header for GPIO definitions
 #include "MY_Step.h"
 
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
+#define STEPPER_COUNT           4U
+#define STEPPER_TIM1_CLK_HZ     1000000UL
+#define STEPPER_TIM234_CLK_HZ   500000UL
+#define STEPPER_MIN_FREQ_HZ     1UL
+#define STEPPER_MAX_FREQ_HZ     60000UL
+#define STEPPER_DEFAULT_FREQ_HZ 9000UL
+#define STEPPER_START_FREQ_HZ   1000UL
+#define STEPPER_RAMP_STEPS      20U
+#define STEPPER_RAMP_DELAY_MS   2U
+#define STEPPER_DEFAULT_SUB     64U
+#define STEPPER_DEFAULT_DIR     1U
 
-void ProcessD2Command(char* command)
+typedef struct
 {
-    size_t command_len = strlen(command);      // 获取命令的长度
+    TIM_HandleTypeDef *htim;
+    uint32_t channel;
+    GPIO_TypeDef *dir_port;
+    uint16_t dir_pin;
+    GPIO_TypeDef *ms1_port;
+    uint16_t ms1_pin;
+    GPIO_TypeDef *ms2_port;
+    uint16_t ms2_pin;
+    GPIO_TypeDef *en_port;
+    uint16_t en_pin;
+    uint32_t timer_clock_hz;
+    uint32_t frequency_hz;
+    uint8_t subdivision;
+    uint8_t direction;
+    uint8_t running;
+} StepperMotor;
 
-    // 如果最后一个字符是'@'，去掉它
-    if (command[command_len - 1] == '@') 
-    {
-        command[command_len - 1] = '\0';
-        command_len--;
-    }
+extern char result_code[CMD_BUFFER_SIZE];
 
-	// 查找命令中的冒号分隔符
-    char *colon_ptr = strchr(command, ':');
-    char prefix[64];  // 用于存储命令前缀
-	if (colon_ptr != NULL)
-    {
-        // 提取命令的前缀
-        size_t prefix_len = colon_ptr - command;
-        strncpy(prefix, command, prefix_len);
-        prefix[prefix_len] = '\0';
-    }
-    else
-    {
-        // 如果没有冒号，前缀就是整个命令
-        strcpy(prefix, command);
-    }
+static StepperMotor stepper_motors[STEPPER_COUNT] = {
+    {&htim1, TIM_CHANNEL_1, TIM1_DIR_GPIO_Port, TIM1_DIR_Pin, TIM1_MS1_GPIO_Port, TIM1_MS1_Pin, TIM1_MS2_GPIO_Port, TIM1_MS2_Pin, TIM1_EN_GPIO_Port, TIM1_EN_Pin, STEPPER_TIM1_CLK_HZ, STEPPER_DEFAULT_FREQ_HZ, STEPPER_DEFAULT_SUB, STEPPER_DEFAULT_DIR, 0},
+    {&htim2, TIM_CHANNEL_1, TIM2_DIR_GPIO_Port, TIM2_DIR_Pin, TIM2_MS1_GPIO_Port, TIM2_MS1_Pin, TIM2_MS2_GPIO_Port, TIM2_MS2_Pin, TIM2_EN_GPIO_Port, TIM2_EN_Pin, STEPPER_TIM234_CLK_HZ, STEPPER_DEFAULT_FREQ_HZ, STEPPER_DEFAULT_SUB, STEPPER_DEFAULT_DIR, 0},
+    {&htim3, TIM_CHANNEL_1, TIM3_DIR_GPIO_Port, TIM3_DIR_Pin, TIM3_MS1_GPIO_Port, TIM3_MS1_Pin, TIM3_MS2_GPIO_Port, TIM3_MS2_Pin, TIM3_EN_GPIO_Port, TIM3_EN_Pin, STEPPER_TIM234_CLK_HZ, STEPPER_DEFAULT_FREQ_HZ, STEPPER_DEFAULT_SUB, STEPPER_DEFAULT_DIR, 0},
+    {&htim4, TIM_CHANNEL_1, TIM4_DIR_GPIO_Port, TIM4_DIR_Pin, TIM4_MS1_GPIO_Port, TIM4_MS1_Pin, TIM4_MS2_GPIO_Port, TIM4_MS2_Pin, TIM4_EN_GPIO_Port, TIM4_EN_Pin, STEPPER_TIM234_CLK_HZ, STEPPER_DEFAULT_FREQ_HZ, STEPPER_DEFAULT_SUB, STEPPER_DEFAULT_DIR, 0},
+};
 
-	if (strcmp(prefix, "dir") == 0)
-    {
-        Set_Direction(command);  // 设置方向命令
-    }
-    else if (strcmp(prefix, "sub") == 0)
-    {
-        Set_Subdivision(command);  // 设置细分命令
-    }
-    else if (strcmp(prefix, "freq") == 0)
-    {
-        Set_Frequency(command);  // 设置频率命令
-    }
-    else if (strcmp(prefix, "stop") == 0)
-    {
-        Stop_StepperMotor();  // 停止命令
-    }
-    else if (strcmp(prefix, "start") == 0)
-    {
-        Start_StepperMotor();  // 启动命令
-    }
-    else
-    {
-        // 处理无效命令
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t *)result_code, strlen(result_code));
-        send_data_from_tx_fifo();
-    }
-}
-
-
-
-static void Subdivision(uint8_t i)
+static void Stepper_SendText(const char *text)
 {
-	if(i==8)
-	{
-		HAL_GPIO_WritePin(GPIOE,TIM1_MS2_Pin, GPIO_PIN_RESET);
-		HAL_GPIO_WritePin(GPIOE,TIM1_MS1_Pin, GPIO_PIN_RESET);
-	}
-	else if(i==32)
-	{
-		HAL_GPIO_WritePin(GPIOE,TIM1_MS2_Pin, GPIO_PIN_RESET);
-		HAL_GPIO_WritePin(GPIOE,TIM1_MS1_Pin, GPIO_PIN_SET);
-	}
-	else if(i==64)
-	{
-		HAL_GPIO_WritePin(GPIOE,TIM1_MS2_Pin, GPIO_PIN_SET);
-		HAL_GPIO_WritePin(GPIOE,TIM1_MS1_Pin, GPIO_PIN_RESET);
-	}
-	else if(i==16)
-	{
-		HAL_GPIO_WritePin(GPIOE,TIM1_MS2_Pin, GPIO_PIN_SET);
-		HAL_GPIO_WritePin(GPIOE,TIM1_MS1_Pin, GPIO_PIN_SET);
-	}
-}
-
-
-
-
-/*
- * 功能: Set_Subdivision
- * 描述: 设置步进电机细分模式
- * 输入: 命令格式 "D2sub:X@"
- * 其中 X 为细分值 (8, 16, 32, 64)
- */
-void Set_Subdivision(char* command)
-{
-    char *colon_pos = strchr(command, ':');
-    if (!colon_pos)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
-    }
-
-    char *sub_str = colon_pos + 1;
-
-    // 检查是否为纯数字
-    for (int i = 0; i < strlen(sub_str); i++)
-    {
-        if (!isdigit(sub_str[i]))
-        {
-            strcpy(result_code, "InvalidCommand.\r\n");
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-            send_data_from_tx_fifo();
-            return;
-        }
-    }
-
-    // 转换为整数
-    int sub_value = atoi(sub_str);
-
-    // 检查是否为允许值
-    if (sub_value != 8 && sub_value != 16 && sub_value != 32 && sub_value != 64)
-    {
-        strcpy(result_code, "Subdivision must be 8, 16, 32, or 64.\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo();
-        return;
-    }
-
-    // 调用底层函数设置细分
-    Subdivision((uint8_t)sub_value);
-
-    // 反馈执行结果
-    snprintf(result_code, sizeof(result_code), "Subdivision set to %d successfully.\r\n", sub_value);
-    fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
+    fifo_s_puts(&uart1_tx_fifo, (const uint8_t *)text, (uint16_t)strlen(text));
     send_data_from_tx_fifo();
 }
 
-
-
-
-static void MoveDirection(uint8_t DIR_Flag)
+static void Stepper_SendInvalid(void)
 {
-	
-	if(DIR_Flag)
-	{
-		// 顺时针
-		HAL_GPIO_WritePin(GPIOE,TIM1_DIR_Pin, GPIO_PIN_SET);
-	}
-	else
-	{
-		// 逆时针
-		HAL_GPIO_WritePin(GPIOE,TIM1_DIR_Pin, GPIO_PIN_RESET);
-	}
-	
+    Stepper_SendText("D2ERR:InvalidCommand\r\n");
 }
 
-
-/*
- * 功能: Set_Direction
- * 描述: 设置步进电机的旋转方向
- * 输入: 命令格式 "D2dir:X@"
- * 其中 X 为 0（逆时针）或 1（顺时针）
- */
-void Set_Direction(char* command)
+static uint8_t Stepper_IsDigits(const char *text)
 {
-    char *colon_pos = strchr(command, ':');
-    if (!colon_pos)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
+    if (text == NULL || *text == '\0') {
+        return 0;
     }
 
-    char *dir_str = colon_pos + 1;
-
-    // 检查是否为纯数字
-    for (size_t i = 0; i < strlen(dir_str); i++)
-    {
-        if (!isdigit((unsigned char)dir_str[i]))
-        {
-            strcpy(result_code, "InvalidCommand\r\n");
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-            send_data_from_tx_fifo();
-            return;
+    while (*text != '\0') {
+        if (!isdigit((unsigned char)*text)) {
+            return 0;
         }
+        text++;
     }
 
-    int dir_value = atoi(dir_str);
+    return 1;
+}
 
-    // 检查取值是否合法
-    if (dir_value != 0 && dir_value != 1)
-    {
-        strcpy(result_code, "Direction must be 0 (CCW) or 1 (CW).\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo();
+static StepperMotor *Stepper_GetMotor(uint8_t motor_id)
+{
+    if (motor_id < 1U || motor_id > STEPPER_COUNT) {
+        return NULL;
+    }
+
+    return &stepper_motors[motor_id - 1U];
+}
+
+static void Stepper_SetSubdivisionPins(StepperMotor *motor, uint8_t subdivision)
+{
+    GPIO_PinState ms1 = GPIO_PIN_RESET;
+    GPIO_PinState ms2 = GPIO_PIN_RESET;
+
+    switch (subdivision) {
+    case 8U:
+        ms1 = GPIO_PIN_RESET;
+        ms2 = GPIO_PIN_RESET;
+        break;
+    case 16U:
+        ms1 = GPIO_PIN_SET;
+        ms2 = GPIO_PIN_SET;
+        break;
+    case 32U:
+        ms1 = GPIO_PIN_SET;
+        ms2 = GPIO_PIN_RESET;
+        break;
+    case 64U:
+        ms1 = GPIO_PIN_RESET;
+        ms2 = GPIO_PIN_SET;
+        break;
+    default:
         return;
     }
 
-    // 调用底层函数
-    MoveDirection((uint8_t)dir_value);
-
-    // 反馈执行结果
-    if (dir_value == 1)
-        strcpy(result_code, "Direction set to 正转\r\n");
-    else
-        strcpy(result_code, "Direction set to 反转\r\n");
-
-    fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-    send_data_from_tx_fifo();
+    HAL_GPIO_WritePin(motor->ms1_port, motor->ms1_pin, ms1);
+    HAL_GPIO_WritePin(motor->ms2_port, motor->ms2_pin, ms2);
+    motor->subdivision = subdivision;
 }
 
-
-
-
-static void Set_Timer_Frequency(int freq_value)
+static void Stepper_SetDirectionPin(StepperMotor *motor, uint8_t direction)
 {
-    // 设置定时器频率（ARR = 自动重装值，ARR 的值即为频率值）
-    __HAL_TIM_SET_AUTORELOAD(&htim1, freq_value - 1);
-
-    // 更新比较值（PWM 调整周期），设置为频率的一半
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, freq_value / 2);
+    HAL_GPIO_WritePin(motor->dir_port, motor->dir_pin, direction ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    motor->direction = direction ? 1U : 0U;
 }
 
-
-/*
- * 功能: Set_Frequency
- * 描述: 设置步进电机的频率（即定时器的自动重装值）
- * 输入: 命令格式 "D2freq:X@"，
- * 其中 X 为频率值
- */
-void Set_Frequency(char* command)
+static uint8_t Stepper_ApplyFrequencyHz(StepperMotor *motor, uint32_t frequency_hz)
 {
-    char *colon_pos = strchr(command, ':');
-    if (!colon_pos)
-    {
-        strcpy(result_code, "InvalidCommand\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo(); 
-        return;
+    uint32_t arr;
+
+    if (frequency_hz < STEPPER_MIN_FREQ_HZ || frequency_hz > STEPPER_MAX_FREQ_HZ) {
+        return 0;
     }
 
-    char *freq_str = colon_pos + 1;
+    arr = (motor->timer_clock_hz / frequency_hz);
+    if (arr == 0U) {
+        arr = 1U;
+    }
 
-    // 检查是否为纯数字
-    for (size_t i = 0; i < strlen(freq_str); i++)
-    {
-        if (!isdigit((unsigned char)freq_str[i]))
-        {
-            strcpy(result_code, "InvalidCommand\r\n");
-            fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-            send_data_from_tx_fifo();
-            return;
+    __HAL_TIM_SET_AUTORELOAD(motor->htim, arr - 1U);
+    __HAL_TIM_SET_COMPARE(motor->htim, motor->channel, arr / 2U);
+    __HAL_TIM_SET_COUNTER(motor->htim, 0U);
+    motor->frequency_hz = frequency_hz;
+
+    return 1;
+}
+
+static uint8_t Stepper_RampFrequencyHz(StepperMotor *motor, uint32_t target_hz)
+{
+    uint32_t start_hz;
+    uint32_t step;
+    uint32_t i;
+
+    if (target_hz < STEPPER_MIN_FREQ_HZ || target_hz > STEPPER_MAX_FREQ_HZ) {
+        return 0;
+    }
+
+    if (motor->frequency_hz == target_hz) {
+        return Stepper_ApplyFrequencyHz(motor, target_hz);
+    }
+
+    if (!motor->running) {
+        return Stepper_ApplyFrequencyHz(motor, target_hz);
+    }
+
+    start_hz = motor->frequency_hz;
+    for (i = 1U; i <= STEPPER_RAMP_STEPS; i++) {
+        if (target_hz >= start_hz) {
+            step = start_hz + ((target_hz - start_hz) * i) / STEPPER_RAMP_STEPS;
+        } else {
+            step = start_hz - ((start_hz - target_hz) * i) / STEPPER_RAMP_STEPS;
         }
+        Stepper_ApplyFrequencyHz(motor, step);
+        HAL_Delay(STEPPER_RAMP_DELAY_MS);
     }
 
-    int freq_value = atoi(freq_str);
+    return Stepper_ApplyFrequencyHz(motor, target_hz);
+}
 
-    // 检查频率是否合理（你可以根据实际需求设置范围）
-    if (freq_value < 1 || freq_value > 10000)  // 假设频率范围是 10 至 10000
-    {
-        strcpy(result_code, "Frequency must be between 10 and 10000\r\n");
-        fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-        send_data_from_tx_fifo();
+static void Stepper_StartMotor(uint8_t motor_id)
+{
+    StepperMotor *motor = Stepper_GetMotor(motor_id);
+    uint32_t target_hz;
+
+    if (motor == NULL) {
+        Stepper_SendInvalid();
         return;
     }
 
-	Set_Timer_Frequency(freq_value);
+    target_hz = motor->frequency_hz;
+    if (motor->frequency_hz > STEPPER_START_FREQ_HZ) {
+        Stepper_ApplyFrequencyHz(motor, STEPPER_START_FREQ_HZ);
+    }
+    HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_RESET);
+    HAL_TIM_PWM_Start(motor->htim, motor->channel);
+    motor->running = 1U;
+    Stepper_RampFrequencyHz(motor, target_hz);
 
-    // 反馈执行结果
-    snprintf(result_code, sizeof(result_code), "Frequency set to %d successfully\r\n", freq_value);
-    fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-    send_data_from_tx_fifo();
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:start%d\r\n", motor_id);
+    Stepper_SendText(result_code);
 }
 
+static void Stepper_StopMotor(uint8_t motor_id)
+{
+    StepperMotor *motor = Stepper_GetMotor(motor_id);
 
+    if (motor == NULL) {
+        Stepper_SendInvalid();
+        return;
+    }
 
+    HAL_TIM_PWM_Stop(motor->htim, motor->channel);
+    HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_SET);
+    motor->running = 0U;
 
-/*
- * 功能: Start_StepperMotor
- * 描述: 启动步进电机
- * 输入: 命令格式 "D2start:@",
- */
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:stop%d\r\n", motor_id);
+    Stepper_SendText(result_code);
+}
+
+static void Stepper_StartAll(void)
+{
+    uint8_t i;
+    uint32_t targets[STEPPER_COUNT];
+    uint32_t start_values[STEPPER_COUNT];
+    uint32_t step;
+    uint32_t freq;
+    uint32_t start_hz;
+    uint32_t target_hz;
+    StepperMotor *motor;
+
+    for (i = 1U; i <= STEPPER_COUNT; i++) {
+        motor = Stepper_GetMotor(i);
+        targets[i - 1U] = motor->frequency_hz;
+        if (motor->frequency_hz > STEPPER_START_FREQ_HZ) {
+            Stepper_ApplyFrequencyHz(motor, STEPPER_START_FREQ_HZ);
+        }
+        start_values[i - 1U] = motor->frequency_hz;
+        HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_RESET);
+        HAL_TIM_PWM_Start(motor->htim, motor->channel);
+        motor->running = 1U;
+    }
+
+    for (step = 1U; step <= STEPPER_RAMP_STEPS; step++) {
+        for (i = 1U; i <= STEPPER_COUNT; i++) {
+            motor = Stepper_GetMotor(i);
+            start_hz = start_values[i - 1U];
+            target_hz = targets[i - 1U];
+
+            if (target_hz >= start_hz) {
+                freq = start_hz + ((target_hz - start_hz) * step) / STEPPER_RAMP_STEPS;
+            } else {
+                freq = start_hz - ((start_hz - target_hz) * step) / STEPPER_RAMP_STEPS;
+            }
+            Stepper_ApplyFrequencyHz(motor, freq);
+        }
+        HAL_Delay(STEPPER_RAMP_DELAY_MS);
+    }
+
+    Stepper_SendText("D2OK:startall\r\n");
+}
+
+static void Stepper_StopAll(void)
+{
+    uint8_t i;
+    StepperMotor *motor;
+
+    for (i = 1U; i <= STEPPER_COUNT; i++) {
+        motor = Stepper_GetMotor(i);
+        HAL_TIM_PWM_Stop(motor->htim, motor->channel);
+        HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_SET);
+        motor->running = 0U;
+    }
+
+    Stepper_SendText("D2OK:stopall\r\n");
+}
+
+static uint8_t Stepper_ParseIndexedCommand(const char *command, const char *name, uint8_t *motor_id, const char **value)
+{
+    size_t name_len = strlen(name);
+    const char *p = command + name_len;
+
+    if (strncmp(command, name, name_len) != 0) {
+        return 0;
+    }
+
+    if (*p >= '1' && *p <= '4') {
+        *motor_id = (uint8_t)(*p - '0');
+        p++;
+    } else {
+        *motor_id = 1U;
+    }
+
+    if (value != NULL) {
+        if (*p != ':') {
+            return 0;
+        }
+        *value = p + 1;
+    } else if (*p == ':' && p[1] == '\0') {
+        return 1;
+    } else if (*p != '\0') {
+        return 0;
+    }
+
+    return 1;
+}
+
+static void Stepper_HandleDir(const char *command)
+{
+    uint8_t motor_id;
+    const char *value;
+    int direction;
+    StepperMotor *motor;
+
+    if (!Stepper_ParseIndexedCommand(command, "dir", &motor_id, &value) || !Stepper_IsDigits(value)) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    direction = atoi(value);
+    if (direction != 0 && direction != 1) {
+        Stepper_SendText("D2ERR:DirectionMustBe0Or1\r\n");
+        return;
+    }
+
+    motor = Stepper_GetMotor(motor_id);
+    if (motor == NULL) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    Stepper_SetDirectionPin(motor, (uint8_t)direction);
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:dir%d:%d\r\n", motor_id, direction);
+    Stepper_SendText(result_code);
+}
+
+static void Stepper_HandleSub(const char *command)
+{
+    uint8_t motor_id;
+    const char *value;
+    int subdivision;
+    StepperMotor *motor;
+
+    if (!Stepper_ParseIndexedCommand(command, "sub", &motor_id, &value) || !Stepper_IsDigits(value)) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    subdivision = atoi(value);
+    if (subdivision != 8 && subdivision != 16 && subdivision != 32 && subdivision != 64) {
+        Stepper_SendText("D2ERR:SubdivisionMustBe8_16_32_64\r\n");
+        return;
+    }
+
+    motor = Stepper_GetMotor(motor_id);
+    if (motor == NULL) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    Stepper_SetSubdivisionPins(motor, (uint8_t)subdivision);
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:sub%d:%d\r\n", motor_id, subdivision);
+    Stepper_SendText(result_code);
+}
+
+static void Stepper_HandleFreq(const char *command)
+{
+    uint8_t motor_id;
+    const char *value;
+    uint32_t frequency_hz;
+    StepperMotor *motor;
+
+    if (!Stepper_ParseIndexedCommand(command, "freq", &motor_id, &value) || !Stepper_IsDigits(value)) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    frequency_hz = (uint32_t)strtoul(value, NULL, 10);
+    motor = Stepper_GetMotor(motor_id);
+    if (motor == NULL) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    if (!Stepper_RampFrequencyHz(motor, frequency_hz)) {
+        Stepper_SendText("D2ERR:FrequencyMustBe1To60000Hz\r\n");
+        return;
+    }
+
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:freq%d:%luHz\r\n", motor_id, (unsigned long)frequency_hz);
+    Stepper_SendText(result_code);
+}
+
+static void Stepper_HandleStartStop(const char *command, uint8_t start)
+{
+    uint8_t motor_id;
+
+    if (start && strcmp(command, "startall") == 0) {
+        Stepper_StartAll();
+        return;
+    }
+
+    if (!start && strcmp(command, "stopall") == 0) {
+        Stepper_StopAll();
+        return;
+    }
+
+    if (!Stepper_ParseIndexedCommand(command, start ? "start" : "stop", &motor_id, NULL)) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    if (start) {
+        Stepper_StartMotor(motor_id);
+    } else {
+        Stepper_StopMotor(motor_id);
+    }
+}
+
+void ProcessD2Command(char *command)
+{
+    size_t len;
+
+    if (command == NULL) {
+        Stepper_SendInvalid();
+        return;
+    }
+
+    len = strlen(command);
+    if (len > 0U && command[len - 1U] == '@') {
+        command[len - 1U] = '\0';
+    }
+
+    if (strncmp(command, "dir", 3) == 0) {
+        Stepper_HandleDir(command);
+    } else if (strncmp(command, "sub", 3) == 0) {
+        Stepper_HandleSub(command);
+    } else if (strncmp(command, "freq", 4) == 0) {
+        Stepper_HandleFreq(command);
+    } else if (strncmp(command, "start", 5) == 0) {
+        Stepper_HandleStartStop(command, 1U);
+    } else if (strncmp(command, "stop", 4) == 0) {
+        Stepper_HandleStartStop(command, 0U);
+    } else {
+        Stepper_SendInvalid();
+    }
+}
+
+void Set_Subdivision(char *command)
+{
+    ProcessD2Command(command);
+}
+
+void Set_Direction(char *command)
+{
+    ProcessD2Command(command);
+}
+
+void Set_Frequency(char *command)
+{
+    ProcessD2Command(command);
+}
+
 void Start_StepperMotor(void)
 {
-	// 使能引脚拉低，启动步进电机
-	HAL_GPIO_WritePin(GPIOE, TIM1_EN_Pin, GPIO_PIN_RESET);  
-	// 启动PWM输出（开启通道 1）
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-
-    strcpy(result_code, "Stepper motor started.\r\n");
-    fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-    send_data_from_tx_fifo();
+    Stepper_StartMotor(1U);
 }
 
-
-
-/*
- * 功能: Stop_StepperMotor
- * 描述: 停止步进电机
- * 输入: 命令格式 "D2stop:@",
- */
 void Stop_StepperMotor(void)
 {
-	// 使能引脚拉高，停止步进电机
-	HAL_GPIO_WritePin(GPIOE, TIM1_EN_Pin, GPIO_PIN_SET);  
-
-    // 停止PWM输出（关闭通道 1）
-    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
-
-    // 反馈信息
-    strcpy(result_code, "Stepper motor stopped.\r\n");
-    fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-    send_data_from_tx_fifo();
+    Stepper_StopMotor(1U);
 }
-
 
 void StepperMotor_Init(void)
 {
-    // 默认频率设置为 100
-    int default_freq = 100;  
-    // 默认细分模式设置为 8
-    uint8_t default_subdivision = 8; 
-    // 默认方向为正转（顺时针）
-    uint8_t default_direction = 1;
+    uint8_t i;
+    StepperMotor *motor;
 
-    // 设置默认的细分模式
-    Subdivision(default_subdivision);
+    for (i = 1U; i <= STEPPER_COUNT; i++) {
+        motor = Stepper_GetMotor(i);
+        Stepper_SetSubdivisionPins(motor, STEPPER_DEFAULT_SUB);
+        Stepper_SetDirectionPin(motor, STEPPER_DEFAULT_DIR);
+        Stepper_ApplyFrequencyHz(motor, STEPPER_DEFAULT_FREQ_HZ);
+        HAL_TIM_PWM_Stop(motor->htim, motor->channel);
+        HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_SET);
+        motor->running = 0U;
+    }
 
-    // 设置默认的运动方向
-    MoveDirection(default_direction);
-
-    // 设置默认频率
-    Set_Timer_Frequency(default_freq);
-
-    snprintf(result_code, sizeof(result_code), "Stepper motor initialized: Subdivision: %d, Direction: %s, Frequency: %d\r\n", 
-            default_subdivision, (default_direction == 1) ? "正转" : "反转", default_freq);
-    fifo_s_puts(&uart1_tx_fifo, (uint8_t*)result_code, strlen(result_code));
-    send_data_from_tx_fifo();
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:init motors=4 sub=%u freq=%luHz\r\n", STEPPER_DEFAULT_SUB, (unsigned long)STEPPER_DEFAULT_FREQ_HZ);
+    Stepper_SendText(result_code);
 }
-
-

@@ -86,6 +86,10 @@ void Processcommand(void)
     while (!fifo_s_is_empty(&uart1_rx_fifo))
     {
         fifo_s_get(&uart1_rx_fifo, &byte);
+        if (cmd_len >= (sizeof(cmd_buf) - 1U))
+        {
+            cmd_len = 0;
+        }
         cmd_buf[cmd_len++] = byte;
 
         if (byte == '@') // ���������???
@@ -128,7 +132,7 @@ void Processcommand(void)
         }
 
         // ��ֹ���������???
-        if (cmd_len >= sizeof(cmd_buf))
+        if (cmd_len >= (sizeof(cmd_buf) - 1U))
             cmd_len = 0;
     }
 }
