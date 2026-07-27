@@ -845,6 +845,16 @@
               <FileType>5</FileType>
               <FilePath>.\User\MY_CO2.h</FilePath>
             </File>
+            <File>
+              <FileName>app_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\User\app_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\User\app_config.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

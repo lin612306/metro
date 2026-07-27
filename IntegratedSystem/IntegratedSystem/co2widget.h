@@ -3,7 +3,6 @@
 
 
 #include <QMainWindow>
-#include <QSerialPort>
 #include <QGroupBox>
 #include <QPushButton>
 #include <QLabel>
@@ -36,9 +35,12 @@ private slots:
     void onStartControl();
     void onStopControl();
     void onSetPI();
+    void onSetTarget();
 
 private:
     QLabel *lblCurrentCO2;
+    QDoubleSpinBox *spinTargetCO2;
+    QPushButton *btnSetTarget;
     QPushButton *btnSetBase;
     QPushButton *btnStartAT;
     QPushButton *btnStartCtrl;
@@ -60,8 +62,9 @@ public:
 private slots:
     void openSerialPort();
     void closeSerialPort();
-    void readSerialData();
-    void handleError(QSerialPort::SerialPortError error);
+    void handleSerialFrame(const QString &prefix, const QString &line);
+    void handleSerialState(bool connected, const QString &portName);
+    void handleSerialError(const QString &message);
     void onPollingTimer();
     void handleSendCommand(QString cmd);
     void onClearLog();
@@ -72,7 +75,6 @@ private:
     void initChart();
     void appendLog(const QString &text);
 
-    QSerialPort *serial;
     QTimer *pollingTimer;
     CO2CtrlWidget *co2Widget;
     QComboBox *portNameCombo;
@@ -80,6 +82,8 @@ private:
     QPushButton *connectBtn;
     QPushButton *disconnectBtn;
     QPlainTextEdit *logEditor;
+    bool m_requestedOpen;
+    double m_targetCO2;
 
     QChartView *chartViewCO2;
     QChart *chartCO2;

@@ -2,7 +2,6 @@
 #define MOTORWIDGET_H
 
 #include <QMainWindow>
-#include <QSerialPort>
 #include <QGroupBox>
 #include <QSpinBox>
 #include <QDoubleSpinBox>
@@ -26,8 +25,9 @@ private slots:
     // 串口相关槽函数
     void openSerialPort();
     void closeSerialPort();
-    void readSerialData();
-    void handleError(QSerialPort::SerialPortError error);
+    void handleSerialFrame(const QString &prefix, const QString &line);
+    void handleSerialState(bool connected, const QString &portName);
+    void handleSerialError(const QString &message);
 
     // 全局控制槽函数
     void onGlobalStartClicked();
@@ -50,9 +50,6 @@ private:
 
     // 频率计算辅助函数
     int calculateFreqFromFlow(double flow);
-
-    QSerialPort *serial;
-    QByteArray m_buffer;
 
     struct MotorControls {
         QComboBox *dirCombo;

@@ -26,10 +26,14 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
-
-
-
+#include "fifo.h"
+#include "uart_dma.h"
+#include "MY_Temper.h"
+#include "MY_TF.h"
+#include "MY_Step.h"
+#include "MY_CO2.h"
+#include "app_config.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -200,6 +204,7 @@ int main(void)
 
   HAL_Delay(1000);
   UART_System_Init();
+  AppConfig_Init();
   HAL_Delay(1000);
   StepperMotor_Init();
   // HAL_Delay(1000);
@@ -227,6 +232,7 @@ int main(void)
 
 
   Processcommand();
+  CO2_ControlTask();
   HAL_IWDG_Refresh(&hiwdg);
 
   }

@@ -1,4 +1,5 @@
 #include "tempwidget.h"
+#include "serialmanager.h"
 #include <QSerialPortInfo>
 #include <QMessageBox>
 #include <QDateTime>
@@ -161,21 +162,27 @@ void TempCtrlWidget::onSetPID()
 // ============================================================================
 
 TempWidget::TempWidget(QWidget *parent)
-    : QWidget(parent), serial(new QSerialPort(this)), m_pollingState(0)
+    : QWidget(parent), m_pollingState(0), m_requestedOpen(false)
 {
     initUI();
 
     pollingTimer = new QTimer(this);
     pollingTimer->setInterval(500);
 
+    SerialManager *manager = SerialManager::instance();
     connect(pollingTimer, &QTimer::timeout, this, &TempWidget::onPollingTimer);
-    connect(serial, &QSerialPort::readyRead, this, &TempWidget::readSerialData);
-    connect(serial, &QSerialPort::errorOccurred, this, &TempWidget::handleError);
+    connect(manager, &SerialManager::frameReceived,
+            this, &TempWidget::handleSerialFrame);
+    connect(manager, &SerialManager::connectionChanged,
+            this, &TempWidget::handleSerialState);
+    connect(manager, &SerialManager::errorMessage,
+            this, &TempWidget::handleSerialError);
+    connect(manager, &SerialManager::logMessage,
+            this, &TempWidget::appendLog);
 }
 
 TempWidget::~TempWidget()
 {
-    if (serial->isOpen()) serial->close();
 }
 void TempWidget::initCharts()
 {
@@ -391,6 +398,8 @@ void TempWidget::initUI()
     connect(btnClearLog, &QPushButton::clicked, this, &TempWidget::onClearLog);
     connect(internalTempWidget, &TempCtrlWidget::showChartSignal, this, &TempWidget::onShowIntChartClicked);
     connect(externalTempWidget, &TempCtrlWidget::showChartSignal, this, &TempWidget::onShowExtChartClicked);
+    connect(internalTempWidget, &TempCtrlWidget::sendCommandSignal, this, &TempWidget::handleSendCommand);
+    connect(externalTempWidget, &TempCtrlWidget::sendCommandSignal, this, &TempWidget::handleSendCommand);
 
     setWindowTitle("温度控制系统");
     resize(1100, 700);
@@ -412,21 +421,94 @@ void TempWidget::onClearLog()
 
 void TempWidget::openSerialPort()
 {
-    serial->setPortName(portNameCombo->currentText());
-    serial->setBaudRate(baudRateCombo->currentText().toInt());
-    serial->setDataBits(QSerialPort::Data8);
-    serial->setParity(QSerialPort::NoParity);
-    serial->setStopBits(QSerialPort::OneStop);
-    serial->setFlowControl(QSerialPort::NoFlowControl);
+    SerialManager *manager = SerialManager::instance();
+    m_requestedOpen = true;
+    if (!manager->openPort(portNameCombo->currentText(), baudRateCombo->currentText().toInt())) {
+        m_requestedOpen = false;
+        QMessageBox::critical(this, "Error", manager->lastError());
+        appendLog("Open failed: " + manager->lastError());
+    }
+}
 
-    if (serial->open(QIODevice::ReadWrite)) {
-        serial->setDataTerminalReady(false);
-        serial->setRequestToSend(false);
+void TempWidget::closeSerialPort()
+{
+    m_requestedOpen = false;
+    SerialManager::instance()->closePort();
+}
 
-        connectBtn->setEnabled(false);
-        disconnectBtn->setEnabled(true);
-        portNameCombo->setEnabled(false);
+void TempWidget::handleSendCommand(QString cmd)
+{
+    SerialManager::instance()->sendCommand(cmd);
+}
 
+void TempWidget::onPollingTimer()
+{
+    if (!SerialManager::instance()->isOpen()) return;
+
+    if (m_pollingState == 0) {
+        SerialManager::instance()->sendCommand("D0gettemp@");
+        m_pollingState = 1;
+    } else {
+        SerialManager::instance()->sendCommand("D1gettemp@");
+        m_pollingState = 0;
+    }
+}
+
+void TempWidget::handleSerialFrame(const QString &prefix, const QString &line)
+{
+    if (prefix == "D2" || prefix == "D3") {
+        return;
+    }
+
+    if (line.startsWith("CMD") || line.contains("Error")) {
+        appendLog("Error: " + line);
+        return;
+    }
+
+    bool ok = false;
+    double tempVal = line.toDouble(&ok);
+    if (!ok) {
+        return;
+    }
+
+    qint64 currentMs = QDateTime::currentMSecsSinceEpoch();
+    qint64 minXMs = currentMs - 1800000;
+    if (minXMs < m_startTimeMs) {
+        minXMs = m_startTimeMs;
+    }
+    qint64 maxXMs = qMax(m_startTimeMs + 60000, currentMs + 10000);
+
+    QDateTime minTime = QDateTime::fromMSecsSinceEpoch(minXMs);
+    QDateTime maxTime = QDateTime::fromMSecsSinceEpoch(maxXMs);
+
+    if (m_pollingState == 1 || prefix == "D0") {
+        internalTempWidget->updateCurrentTempDisplay(tempVal);
+        seriesInt->append(currentMs, tempVal);
+        axisXInt->setRange(minTime, maxTime);
+        seriesTargetInt->replace(QList<QPointF>() << QPointF(minXMs, 37.0) << QPointF(maxXMs, 37.0));
+        labelSeriesInt->replace(QList<QPointF>() << QPointF(minXMs, 37.0));
+        if (seriesInt->count() > 4000) seriesInt->removePoints(0, 100);
+    } else {
+        externalTempWidget->updateCurrentTempDisplay(tempVal);
+        seriesExt->append(currentMs, tempVal);
+        axisXExt->setRange(minTime, maxTime);
+        seriesTargetExt->replace(QList<QPointF>() << QPointF(minXMs, 30.0) << QPointF(maxXMs, 30.0));
+        labelSeriesExt->replace(QList<QPointF>() << QPointF(minXMs, 30.0));
+        if (seriesExt->count() > 4000) seriesExt->removePoints(0, 100);
+    }
+}
+
+void TempWidget::handleSerialState(bool connected, const QString &portName)
+{
+    connectBtn->setEnabled(!connected);
+    disconnectBtn->setEnabled(connected);
+    portNameCombo->setEnabled(!connected);
+
+    if (connected) {
+        if (!m_requestedOpen) {
+            appendLog("Shared serial connected: " + portName);
+            return;
+        }
         m_startTimeMs = QDateTime::currentMSecsSinceEpoch();
         seriesInt->clear();
         seriesExt->clear();
@@ -434,110 +516,19 @@ void TempWidget::openSerialPort()
         QDateTime endTime = startTime.addSecs(60);
         axisXInt->setRange(startTime, endTime);
         axisXExt->setRange(startTime, endTime);
-
         logEditor->clear();
-        appendLog("连接成功: " + serial->portName());
-
+        appendLog("Connected: " + portName);
         m_pollingState = 0;
         pollingTimer->start();
     } else {
-        QMessageBox::critical(this, "错误", serial->errorString());
-        appendLog("连接失败: " + serial->errorString());
+        pollingTimer->stop();
+        appendLog("Disconnected");
     }
 }
 
-void TempWidget::closeSerialPort()
+void TempWidget::handleSerialError(const QString &message)
 {
-    pollingTimer->stop();
-    if (serial->isOpen()) serial->close();
-
-    connectBtn->setEnabled(true);
-    disconnectBtn->setEnabled(false);
-    portNameCombo->setEnabled(true);
-    appendLog("连接已断开");
-}
-
-void TempWidget::handleSendCommand(QString cmd)
-{
-    if (!serial->isOpen()) return;
-    serial->write(cmd.toLocal8Bit());
-    appendLog("发送 -> " + cmd.trimmed());
-}
-
-void TempWidget::onPollingTimer()
-{
-    if (!serial->isOpen()) return;
-    if (m_pollingState == 0) {
-        serial->write("D0gettemp@");
-        m_pollingState = 1;
-    } else if (m_pollingState == 1) {
-        serial->write("D1gettemp@");
-        m_pollingState = 0;
-    }
-}
-void TempWidget::readSerialData()
-{
-    while (serial->canReadLine()) {
-        QByteArray lineData = serial->readLine();
-        QString line = QString::fromLocal8Bit(lineData).trimmed();
-        if (line.isEmpty()) continue;
-
-        if (line.startsWith("CMD") || line.contains("Error")) {
-            appendLog("系统: " + line);
-            continue;
-        }
-
-        bool ok;
-        double tempVal = line.toDouble(&ok);
-        if (ok) {
-            // 直接获取当前的毫秒时间戳
-            qint64 currentMs = QDateTime::currentMSecsSinceEpoch();
-
-            // --- 动态计算 X 轴范围 (最多显示30分钟 = 1800000 毫秒) ---
-            qint64 minXMs = currentMs - 1800000;
-            if (minXMs < m_startTimeMs) {
-                minXMs = m_startTimeMs; // 如果运行时间不足30分钟，起点固定为连接串口的时间
-            }
-            // 保证右侧有一点余量（刚开始时强制撑满60秒，之后跟随当前时间推移）
-            qint64 maxXMs = qMax(m_startTimeMs + 60000, currentMs + 10000);
-
-            QDateTime minTime = QDateTime::fromMSecsSinceEpoch(minXMs);
-            QDateTime maxTime = QDateTime::fromMSecsSinceEpoch(maxXMs);
-
-            if (m_pollingState == 1) {
-                internalTempWidget->updateCurrentTempDisplay(tempVal);
-
-                // 传入时间戳
-                seriesInt->append(currentMs, tempVal);
-                // 应用真实时间范围
-                axisXInt->setRange(minTime, maxTime);
-                //更新虚线和标签的时间坐标
-                seriesTargetInt->replace(QList<QPointF>() << QPointF(minXMs, 37.0) << QPointF(maxXMs, 37.0));
-                labelSeriesInt->replace(QList<QPointF>() << QPointF(minXMs, 37.0));
-
-                if (seriesInt->count() > 4000) seriesInt->removePoints(0, 100);
-            } else {
-                externalTempWidget->updateCurrentTempDisplay(tempVal);
-                // 传入时间戳
-                seriesExt->append(currentMs, tempVal);
-                // 应用真实时间范围
-                axisXExt->setRange(minTime, maxTime);
-                // 更新虚线和标签的时间坐标
-                seriesTargetExt->replace(QList<QPointF>() << QPointF(minXMs, 30.0) << QPointF(maxXMs, 30.0));
-                labelSeriesExt->replace(QList<QPointF>() << QPointF(minXMs, 30.0));
-
-                if (seriesExt->count() > 4000) seriesExt->removePoints(0, 100);
-            }
-        }
-    }
-}
-
-void TempWidget::handleError(QSerialPort::SerialPortError error)
-{
-    if (error == QSerialPort::ResourceError) {
-        QMessageBox::critical(this, "错误", serial->errorString());
-        closeSerialPort();
-    }
+    appendLog("Error: " + message);
 }
 
 void TempWidget::onShowIntChartClicked()

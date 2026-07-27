@@ -6,6 +6,7 @@
  * 示例: D2freq1:9000@, D2sub1:64@, D2startall@, D2stopall@。
  */
 #include "MY_Step.h"
+#include "app_config.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -104,6 +105,20 @@ static StepperMotor *Stepper_GetMotor(uint8_t motor_id)
 /*
  * 设置细分引脚。默认 64 细分, 用于低流量稳定灌流。
  */
+static AppMotorConfig *Stepper_GetConfig(uint8_t motor_id)
+{
+    if (motor_id < 1U || motor_id > STEPPER_COUNT) {
+        return NULL;
+    }
+
+    return &AppConfig_Mutable()->motor[motor_id - 1U];
+}
+
+static uint8_t Stepper_IsValidSubdivision(uint8_t subdivision)
+{
+    return (subdivision == 8U || subdivision == 16U || subdivision == 32U || subdivision == 64U);
+}
+
 static void Stepper_SetSubdivisionPins(StepperMotor *motor, uint8_t subdivision)
 {
     GPIO_PinState ms1 = GPIO_PIN_RESET;
@@ -445,6 +460,15 @@ static void Stepper_HandleStartStop(const char *command, uint8_t start)
 /*
  * D2 命令入口。支持 dirN:x, subN:x, freqN:x, startN, stopN, startall, stopall。
  */
+static void Stepper_SaveConfig(void)
+{
+    if (AppConfig_Save() == HAL_OK) {
+        Stepper_SendText("D2OK:save\r\n");
+    } else {
+        Stepper_SendText("D2ERR:save\r\n");
+    }
+}
+
 void ProcessD2Command(char *command)
 {
     size_t len;
@@ -459,7 +483,9 @@ void ProcessD2Command(char *command)
         command[len - 1U] = '\0';
     }
 
-    if (strncmp(command, "dir", 3) == 0) {
+    if (strcmp(command, "save") == 0) {
+        Stepper_SaveConfig();
+    } else if (strncmp(command, "dir", 3) == 0) {
         Stepper_HandleDir(command);
     } else if (strncmp(command, "sub", 3) == 0) {
         Stepper_HandleSub(command);
@@ -508,15 +534,28 @@ void StepperMotor_Init(void)
     StepperMotor *motor;
 
     for (i = 1U; i <= STEPPER_COUNT; i++) {
+        AppMotorConfig *cfg = Stepper_GetConfig(i);
+        uint8_t subdivision = cfg->subdivision;
+        uint32_t frequency = cfg->frequency_hz;
+
+        if (!Stepper_IsValidSubdivision(subdivision)) {
+            subdivision = STEPPER_DEFAULT_SUB;
+            cfg->subdivision = subdivision;
+        }
+        if (frequency < STEPPER_MIN_FREQ_HZ || frequency > STEPPER_MAX_FREQ_HZ) {
+            frequency = STEPPER_DEFAULT_FREQ_HZ;
+            cfg->frequency_hz = frequency;
+        }
+
         motor = Stepper_GetMotor(i);
-        Stepper_SetSubdivisionPins(motor, STEPPER_DEFAULT_SUB);
-        Stepper_SetDirectionPin(motor, STEPPER_DEFAULT_DIR);
-        Stepper_ApplyFrequencyHz(motor, STEPPER_DEFAULT_FREQ_HZ);
+        Stepper_SetSubdivisionPins(motor, subdivision);
+        Stepper_SetDirectionPin(motor, cfg->direction ? 1U : 0U);
+        Stepper_ApplyFrequencyHz(motor, frequency);
         HAL_TIM_PWM_Stop(motor->htim, motor->channel);
         HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_SET);
         motor->running = 0U;
     }
 
-    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:init motors=4 sub=%u freq=%luHz\r\n", STEPPER_DEFAULT_SUB, (unsigned long)STEPPER_DEFAULT_FREQ_HZ);
+    snprintf(result_code, CMD_BUFFER_SIZE, "D2OK:init motors=4 sub=%u freq=%luHz\r\n", stepper_motors[0].subdivision, (unsigned long)stepper_motors[0].frequency_hz);
     Stepper_SendText(result_code);
 }

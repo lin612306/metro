@@ -3,7 +3,6 @@
 
 
 #include <QMainWindow>
-#include <QSerialPort>
 #include <QGroupBox>
 #include <QDoubleSpinBox>
 #include <QPushButton>
@@ -75,8 +74,9 @@ public:
 private slots:
     void openSerialPort();
     void closeSerialPort();
-    void readSerialData();
-    void handleError(QSerialPort::SerialPortError error);
+    void handleSerialFrame(const QString &prefix, const QString &line);
+    void handleSerialState(bool connected, const QString &portName);
+    void handleSerialError(const QString &message);
     void onPollingTimer();
     void handleSendCommand(QString cmd);
     void onClearLog();
@@ -88,7 +88,6 @@ private:
     void initCharts();
     void appendLog(const QString &text);
 
-    QSerialPort *serial;
     QTimer *pollingTimer;
     TempCtrlWidget *internalTempWidget;
     TempCtrlWidget *externalTempWidget;
@@ -97,6 +96,7 @@ private:
     QPushButton *connectBtn;
     QPushButton *disconnectBtn;
     int m_pollingState;
+    bool m_requestedOpen;
 
     //  日志显示框
     QPlainTextEdit *logEditor;

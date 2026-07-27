@@ -1,4 +1,5 @@
 #include "motorwidget.h"
+#include "serialmanager.h"
 #include <QSerialPortInfo>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -8,18 +9,23 @@
 #include <QDebug>
 
 MotorWidget::MotorWidget(QWidget *parent)
-    : QWidget(parent), serial(new QSerialPort(this))
+    : QWidget(parent)
 {
     initUI();
 
-    connect(serial, &QSerialPort::readyRead, this, &MotorWidget::readSerialData);
-    connect(serial, &QSerialPort::errorOccurred, this, &MotorWidget::handleError);
+    SerialManager *manager = SerialManager::instance();
+    connect(manager, &SerialManager::frameReceived,
+            this, &MotorWidget::handleSerialFrame);
+    connect(manager, &SerialManager::connectionChanged,
+            this, &MotorWidget::handleSerialState);
+    connect(manager, &SerialManager::errorMessage,
+            this, &MotorWidget::handleSerialError);
+    connect(manager, &SerialManager::logMessage,
+            this, [this](const QString &message) { logConsole->append(message); });
 }
 
 MotorWidget::~MotorWidget()
 {
-    if (serial->isOpen())
-        serial->close();
 }
 
 void MotorWidget::initUI()
@@ -303,94 +309,51 @@ void MotorWidget::onGlobalStopClicked()
 
 void MotorWidget::openSerialPort()
 {
-    serial->setPortName(portNameCombo->currentText());
-    serial->setBaudRate(baudRateCombo->currentText().toInt());
-    serial->setDataBits(QSerialPort::Data8);
-    serial->setParity(QSerialPort::NoParity);
-    serial->setStopBits(QSerialPort::OneStop);
-    serial->setFlowControl(QSerialPort::NoFlowControl);
-
-    if (serial->open(QIODevice::ReadWrite)) {
-        serial->setDataTerminalReady(false);
-        serial->setRequestToSend(false);
-
-        connectBtn->setEnabled(false);
-        disconnectBtn->setEnabled(true);
-        portNameCombo->setEnabled(false);
-
-        //  连接时可以启用全局按钮
-        globalStartBtn->setEnabled(true);
-        globalStopBtn->setEnabled(true);
-
-        logConsole->append(QString("[%1] 已连接到 %2").arg(QTime::currentTime().toString("HH:mm:ss")).arg(serial->portName()));
-    } else {
-        QMessageBox::critical(this, "连接错误", serial->errorString());
+    SerialManager *manager = SerialManager::instance();
+    if (!manager->openPort(portNameCombo->currentText(), baudRateCombo->currentText().toInt())) {
+        QMessageBox::critical(this, "Connection Error", manager->lastError());
     }
 }
 
 void MotorWidget::closeSerialPort()
 {
-    if (serial->isOpen())
-        serial->close();
-    connectBtn->setEnabled(true);
-    disconnectBtn->setEnabled(false);
-    portNameCombo->setEnabled(true);
-
-    // 断开时禁用全局按钮
-    globalStartBtn->setEnabled(false);
-    globalStopBtn->setEnabled(false);
-
-    logConsole->append(QString("[%1] 已断开连接").arg(QTime::currentTime().toString("HH:mm:ss")));
+    SerialManager::instance()->closePort();
 }
 
 void MotorWidget::sendCommand(const QString &cmd)
 {
-    if (serial->isOpen()) {
-        QByteArray data = cmd.toLocal8Bit();
-        serial->write(data);
-        logConsole->append(QString("发送 >> %1").arg(cmd.trimmed()));
+    if (!SerialManager::instance()->sendCommand(cmd)) {
+        QMessageBox::warning(this, "Warning", "Serial port is not open.");
+    }
+}
+
+void MotorWidget::handleSerialFrame(const QString &prefix, const QString &line)
+{
+    Q_UNUSED(prefix);
+    Q_UNUSED(line);
+}
+
+void MotorWidget::handleSerialState(bool connected, const QString &portName)
+{
+    connectBtn->setEnabled(!connected);
+    disconnectBtn->setEnabled(connected);
+    portNameCombo->setEnabled(!connected);
+    globalStartBtn->setEnabled(connected);
+    globalStopBtn->setEnabled(connected);
+
+    if (connected) {
+        logConsole->append(QString("[%1] Connected to %2")
+                           .arg(QTime::currentTime().toString("HH:mm:ss"))
+                           .arg(portName));
     } else {
-        QMessageBox::warning(this, "警告", "串口未连接，请先连接！");
+        logConsole->append(QString("[%1] Disconnected")
+                           .arg(QTime::currentTime().toString("HH:mm:ss")));
     }
 }
 
-void MotorWidget::readSerialData()
+void MotorWidget::handleSerialError(const QString &message)
 {
-    // 1. 把新收到的数据追加到缓冲区屁股后面
-    QByteArray data = serial->readAll();
-    m_buffer.append(data);
-
-    // 2. 检查缓冲区里有没有“换行符” (\n)
-    while (m_buffer.contains('\n')) {
-
-        // 找到换行符的位置
-        int index = m_buffer.indexOf('\n');
-
-        // 把这一句从缓冲区里“挖”出来 (left取左边部分)
-        QByteArray line = m_buffer.left(index);
-
-        // 这一句已经被挖出来了，从缓冲区里彻底删掉 (包括那个换行符 index+1)
-        m_buffer.remove(0, index + 1);
-
-        // 处理一下：去掉可能存在的“回车符” (\r)
-        if (line.endsWith('\r')) {
-            line.chop(1);
-        }
-
-        // 如果这一行不是空的，就显示出来
-        if (!line.isEmpty()) {
-            QString msg = QString::fromLocal8Bit(line);
-            logConsole->append(QString("接收 << %1").arg(msg));
-        }
-    }
-}
-
-void MotorWidget::handleError(QSerialPort::SerialPortError error)
-{
-    if (error == QSerialPort::ResourceError) {
-        QMessageBox::critical(this, "严重错误", serial->errorString());
-        closeSerialPort();
-    }
+    logConsole->append(QString("Error: %1").arg(message));
 }
 
 void MotorWidget::onSetDirClicked(int motorId)

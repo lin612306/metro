@@ -50,6 +50,8 @@ EventRecorderStub.scvd
 .mxproject
 .vscode/
 .idea/
+.qtcreator/
+build_qt_check/
 *.user
 *.suo
 *.tmp

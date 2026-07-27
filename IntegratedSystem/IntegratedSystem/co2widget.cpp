@@ -1,4 +1,5 @@
 #include "co2widget.h"
+#include "serialmanager.h"
 #include <QSerialPortInfo>
 #include <QDateTime>
 #include <QScrollBar>
@@ -30,6 +31,23 @@ CO2CtrlWidget::CO2CtrlWidget(const QString &title, QWidget *parent)
     currLayout->addStretch();
 
     // --- 第二行：基线校准 ---
+    // --- Target concentration ---
+    QHBoxLayout *targetLayout = new QHBoxLayout();
+    spinTargetCO2 = new QDoubleSpinBox();
+    spinTargetCO2->setRange(400, 60000);
+    spinTargetCO2->setDecimals(0);
+    spinTargetCO2->setValue(50000);
+    spinTargetCO2->setSuffix(" ppm");
+    spinTargetCO2->setFixedWidth(110);
+    btnSetTarget = new QPushButton("Set Target");
+    btnSetTarget->setFixedHeight(30);
+    targetLayout->addStretch();
+    targetLayout->addWidget(new QLabel("??:"));
+    targetLayout->addWidget(spinTargetCO2);
+    targetLayout->addWidget(btnSetTarget);
+    targetLayout->addStretch();
+
+    // --- Target concentration ---
     QHBoxLayout *baseLayout = new QHBoxLayout();
     btnSetBase = new QPushButton("启动基线校准");
     btnSetBase->setFixedHeight(30);
@@ -79,6 +97,7 @@ CO2CtrlWidget::CO2CtrlWidget(const QString &title, QWidget *parent)
 
     // 加入主布局
     mainLayout->addLayout(currLayout);
+    mainLayout->addLayout(targetLayout); // target concentration
     mainLayout->addLayout(baseLayout);  // 基线校准
     mainLayout->addLayout(atLayout);    // 启动自整定
     mainLayout->addLayout(btnLayout2);  // 启停控制
@@ -86,6 +105,7 @@ CO2CtrlWidget::CO2CtrlWidget(const QString &title, QWidget *parent)
 
 
     // 信号槽
+    connect(btnSetTarget, &QPushButton::clicked, this, &CO2CtrlWidget::onSetTarget);
     connect(btnSetBase, &QPushButton::clicked, this, &CO2CtrlWidget::onSetBase);
     connect(btnStartAT, &QPushButton::clicked, this, &CO2CtrlWidget::onStartAutoTune);
     connect(btnStartCtrl, &QPushButton::clicked, this, &CO2CtrlWidget::onStartControl);
@@ -102,6 +122,11 @@ void CO2CtrlWidget::updatePIDisplay(double p, double i)
 {
     spinP->setValue(p);
     spinI->setValue(i);
+}
+
+void CO2CtrlWidget::onSetTarget()
+{
+    emit sendCommandSignal(QString("D3settarget:%1@").arg((int)spinTargetCO2->value()));
 }
 
 void CO2CtrlWidget::onSetBase()
@@ -145,21 +170,27 @@ void CO2CtrlWidget::onSetPI()
 //  MainWindow 实现
 // ============================================================================
 CO2Widget::CO2Widget(QWidget *parent)
-    : QWidget(parent), serial(new QSerialPort(this))
+    : QWidget(parent), m_requestedOpen(false), m_targetCO2(50000.0)
 {
     initUI();
     pollingTimer = new QTimer(this);
     pollingTimer->setInterval(1000);
 
+    SerialManager *manager = SerialManager::instance();
     connect(pollingTimer, &QTimer::timeout, this, &CO2Widget::onPollingTimer);
-    connect(serial, &QSerialPort::readyRead, this, &CO2Widget::readSerialData);
-    connect(serial, &QSerialPort::errorOccurred, this, &CO2Widget::handleError);
+    connect(manager, &SerialManager::frameReceived,
+            this, &CO2Widget::handleSerialFrame);
+    connect(manager, &SerialManager::connectionChanged,
+            this, &CO2Widget::handleSerialState);
+    connect(manager, &SerialManager::errorMessage,
+            this, &CO2Widget::handleSerialError);
+    connect(manager, &SerialManager::logMessage,
+            this, &CO2Widget::appendLog);
     connect(co2Widget, &CO2CtrlWidget::sendCommandSignal, this, &CO2Widget::handleSendCommand);
 }
 
 CO2Widget::~CO2Widget()
 {
-    if (serial->isOpen()) serial->close();
 }
 
 
@@ -230,8 +261,8 @@ void CO2Widget::initChart()
     labelSeriesCO2->attachAxis(axisYCO2);
 
     // 初始化虚线和标签位置为真实时间戳
-    seriesTargetCO2->replace(QList<QPointF>() << QPointF(nowMs, 50000) << QPointF(nowMs + 60000, 50000));
-    labelSeriesCO2->replace(QList<QPointF>() << QPointF(nowMs, 50000));
+    seriesTargetCO2->replace(QList<QPointF>() << QPointF(nowMs, m_targetCO2) << QPointF(nowMs + 60000, m_targetCO2));
+    labelSeriesCO2->replace(QList<QPointF>() << QPointF(nowMs, m_targetCO2));
 
     chartViewCO2 = new QChartView(chartCO2);
     chartViewCO2->setRenderHint(QPainter::Antialiasing);
@@ -339,129 +370,118 @@ void CO2Widget::onClearLog()
 
 void CO2Widget::openSerialPort()
 {
-    serial->setPortName(portNameCombo->currentText());
-    serial->setBaudRate(baudRateCombo->currentText().toInt());
-    serial->setDataBits(QSerialPort::Data8);
-    serial->setParity(QSerialPort::NoParity);
-    serial->setStopBits(QSerialPort::OneStop);
-    serial->setFlowControl(QSerialPort::NoFlowControl);
-
-    if (serial->open(QIODevice::ReadWrite)) {
-        connectBtn->setEnabled(false);
-        disconnectBtn->setEnabled(true);
-        portNameCombo->setEnabled(false);
-
-        m_startTimeMs = QDateTime::currentMSecsSinceEpoch();
-        seriesCO2->clear();
-        QDateTime startTime = QDateTime::fromMSecsSinceEpoch(m_startTimeMs);
-        QDateTime endTime = startTime.addSecs(60);
-        axisXCO2->setRange(startTime, endTime);
-
-        logEditor->clear();
-        appendLog("✅ 连接成功: " + serial->portName());
-
-        pollingTimer->start();
-        // 连接成功后，延时 500ms 自动获取一次 PI 参数
-        QTimer::singleShot(500, this, [this]() {
-            if (serial->isOpen()) {
-                serial->write("D3getpi@");
-                appendLog("TX -> D3getpi@ (上电自动读取)");
-            }
-        });
-    } else {
-        QMessageBox::critical(this, "错误", serial->errorString());
-        appendLog("❌ 连接失败: " + serial->errorString());
+    SerialManager *manager = SerialManager::instance();
+    m_requestedOpen = true;
+    if (!manager->openPort(portNameCombo->currentText(), baudRateCombo->currentText().toInt())) {
+        m_requestedOpen = false;
+        QMessageBox::critical(this, "Error", manager->lastError());
+        appendLog("Open failed: " + manager->lastError());
     }
 }
 
 void CO2Widget::closeSerialPort()
 {
-    pollingTimer->stop();
-    if (serial->isOpen()) serial->close();
-
-    connectBtn->setEnabled(true);
-    disconnectBtn->setEnabled(false);
-    portNameCombo->setEnabled(true);
-    appendLog("🔴 连接已断开");
+    m_requestedOpen = false;
+    SerialManager::instance()->closePort();
 }
 
 void CO2Widget::handleSendCommand(QString cmd)
 {
-    if (!serial->isOpen()) return;
-    serial->write(cmd.toLocal8Bit());
-    appendLog("TX -> " + cmd.trimmed());
+    SerialManager::instance()->sendCommand(cmd);
 }
 
 void CO2Widget::onPollingTimer()
 {
-    if (!serial->isOpen()) return;
-    serial->write("D3getco2@");
+    if (!SerialManager::instance()->isOpen()) return;
+    SerialManager::instance()->sendCommand("D3getco2@");
 }
 
-
-
-void CO2Widget::readSerialData()
+void CO2Widget::handleSerialFrame(const QString &prefix, const QString &line)
 {
-    while (serial->canReadLine()) {
-        QByteArray lineData = serial->readLine();
-        QString line = QString::fromLocal8Bit(lineData).trimmed();
-        if (line.isEmpty()) continue;
+    if (!(prefix == "D3" || line.startsWith("CO2Concentration:") || line.startsWith("CurrentPI:"))) {
+        return;
+    }
 
-        if (line.startsWith("CO2Concentration:")) {
-            QRegularExpression rx("(\\d+)");
-            QRegularExpressionMatch match = rx.match(line);
-            if (match.hasMatch()) {
-                long co2Val = match.captured(1).toLong();
-                qint64 currentMs = QDateTime::currentMSecsSinceEpoch(); // 获取当前毫秒时间戳
+    if (line.startsWith("CO2Concentration:")) {
+        QRegularExpression rx("(\\d+)");
+        QRegularExpressionMatch match = rx.match(line);
+        if (match.hasMatch()) {
+            long co2Val = match.captured(1).toLong();
+            qint64 currentMs = QDateTime::currentMSecsSinceEpoch();
 
-                co2Widget->updateCurrentCO2Display(co2Val);
-                seriesCO2->append(currentMs, co2Val); // 传入真实的毫秒时间戳
+            co2Widget->updateCurrentCO2Display(co2Val);
+            seriesCO2->append(currentMs, co2Val);
 
-                // --- 动态计算 X 轴范围 (最多显示30分钟 = 1800000 毫秒) ---
-                qint64 minXMs = currentMs - 1800000;
-                if (minXMs < m_startTimeMs) {
-                    minXMs = m_startTimeMs; // 运行不足30分钟时，起点固定为连接时间
-                }
-                qint64 maxXMs = qMax(m_startTimeMs + 60000, currentMs + 10000); // 留出一点余量
+            qint64 minXMs = currentMs - 1800000;
+            if (minXMs < m_startTimeMs) {
+                minXMs = m_startTimeMs;
+            }
+            qint64 maxXMs = qMax(m_startTimeMs + 60000, currentMs + 10000);
 
-                QDateTime minTime = QDateTime::fromMSecsSinceEpoch(minXMs);
-                QDateTime maxTime = QDateTime::fromMSecsSinceEpoch(maxXMs);
+            QDateTime minTime = QDateTime::fromMSecsSinceEpoch(minXMs);
+            QDateTime maxTime = QDateTime::fromMSecsSinceEpoch(maxXMs);
+            axisXCO2->setRange(minTime, maxTime);
+            seriesTargetCO2->replace(QList<QPointF>() << QPointF(minXMs, m_targetCO2) << QPointF(maxXMs, m_targetCO2));
+            labelSeriesCO2->replace(QList<QPointF>() << QPointF(minXMs, m_targetCO2));
 
-                // 应用动态范围
-                axisXCO2->setRange(minTime, maxTime);
-
-                // 更新虚线和标签的时间坐标
-                seriesTargetCO2->replace(QList<QPointF>() << QPointF(minXMs, 50000.0) << QPointF(maxXMs, 50000.0));
-                labelSeriesCO2->replace(QList<QPointF>() << QPointF(minXMs, 50000.0));
-
-                // 1000ms轮询一次，30分钟大约 1800 个点，保留 2000 个防溢出
-                if (seriesCO2->count() > 2000) {
-                    seriesCO2->removePoints(0, 100);
-                }
+            if (seriesCO2->count() > 2000) {
+                seriesCO2->removePoints(0, 100);
             }
         }
-        else if (line.startsWith("CurrentPI:")) {
-            QRegularExpression rx("Kp=([-+]?\\d*\\.?\\d+),\\s*Ki=([-+]?\\d*\\.?\\d+)");
-            QRegularExpressionMatch match = rx.match(line);
-            if (match.hasMatch()) {
-                double p = match.captured(1).toDouble();
-                double i = match.captured(2).toDouble();
-                co2Widget->updatePIDisplay(p, i);
-                appendLog("✅ PI参数已更新");
-            }
+    }
+    else if (line.startsWith("D3OK:target:")) {
+        QRegularExpression rx("target:(\\d+)");
+        QRegularExpressionMatch match = rx.match(line);
+        if (match.hasMatch()) {
+            m_targetCO2 = match.captured(1).toDouble();
+            appendLog(QString("CO2 target updated: %1 ppm").arg(m_targetCO2, 0, 'f', 0));
         }
-        else {
-            appendLog("RX <- " + line);
+    }
+    else if (line.startsWith("CurrentPI:")) {
+        QRegularExpression rx("Kp=([-+]?\\d*\\.?\\d+),\\s*Ki=([-+]?\\d*\\.?\\d+)");
+        QRegularExpressionMatch match = rx.match(line);
+        if (match.hasMatch()) {
+            double p = match.captured(1).toDouble();
+            double i = match.captured(2).toDouble();
+            co2Widget->updatePIDisplay(p, i);
+            appendLog("PI updated");
         }
+    }
+    else {
+        // Unified RX logging is handled by SerialManager.
     }
 }
 
-
-
-void CO2Widget::handleError(QSerialPort::SerialPortError error)
+void CO2Widget::handleSerialState(bool connected, const QString &portName)
 {
-    if (error == QSerialPort::ResourceError) {
-        QMessageBox::critical(this, "错误", serial->errorString());
-        closeSerialPort();
+    connectBtn->setEnabled(!connected);
+    disconnectBtn->setEnabled(connected);
+    portNameCombo->setEnabled(!connected);
+
+    if (connected) {
+        if (!m_requestedOpen) {
+            appendLog("Shared serial connected: " + portName);
+            return;
+        }
+        m_startTimeMs = QDateTime::currentMSecsSinceEpoch();
+        seriesCO2->clear();
+        QDateTime startTime = QDateTime::fromMSecsSinceEpoch(m_startTimeMs);
+        axisXCO2->setRange(startTime, startTime.addSecs(60));
+        logEditor->clear();
+        appendLog("Connected: " + portName);
+        pollingTimer->start();
+        QTimer::singleShot(500, this, [this]() {
+            if (SerialManager::instance()->isOpen()) {
+                SerialManager::instance()->sendCommand("D3getpi@");
+            }
+        });
+    } else {
+        pollingTimer->stop();
+        appendLog("Disconnected");
     }
+}
+
+void CO2Widget::handleSerialError(const QString &message)
+{
+    appendLog("Error: " + message);
 }

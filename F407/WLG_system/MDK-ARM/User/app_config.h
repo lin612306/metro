@@ -1,0 +1,51 @@
+#ifndef __APP_CONFIG_H
+#define __APP_CONFIG_H
+
+#include "stm32f4xx_hal.h"
+#include <stdint.h>
+
+#define APP_CONFIG_MOTOR_COUNT 4U
+
+typedef struct
+{
+    float target_temp;
+    float kp;
+    float ki;
+    float kd;
+} AppTempConfig;
+
+typedef struct
+{
+    uint32_t target_ppm;
+    float kp;
+    float ki;
+    uint8_t control_enabled;
+} AppCO2Config;
+
+typedef struct
+{
+    uint8_t direction;
+    uint8_t subdivision;
+    uint32_t frequency_hz;
+    float flow_k;
+    float flow_b;
+} AppMotorConfig;
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t crc32;
+    AppTempConfig d0_temp;
+    AppTempConfig d1_temp;
+    AppCO2Config co2;
+    AppMotorConfig motor[APP_CONFIG_MOTOR_COUNT];
+} AppConfig;
+
+void AppConfig_Init(void);
+void AppConfig_LoadDefaults(void);
+HAL_StatusTypeDef AppConfig_Save(void);
+const AppConfig *AppConfig_Get(void);
+AppConfig *AppConfig_Mutable(void);
+
+#endif
