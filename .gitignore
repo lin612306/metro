@@ -1,0 +1,64 @@
+# Build artifacts
+build/
+*/build/
+*.o
+*.obj
+*.d
+*.crf
+*.lst
+*.lnp
+*.map
+*.htm
+*.html
+*.axf
+*.elf
+*.hex
+*.bin
+*.bak
+*.dep
+*.iex
+
+# Executables and generated Qt files
+*.exe
+*.dll
+*.so
+*.dylib
+moc_*.cpp
+moc_*.o
+moc_predefs.h
+ui_*.h
+qrc_*.cpp
+Makefile
+Makefile.*
+object_script.*
+
+# Keil / debugger local state
+*.uvguix.*
+*.scvd
+JLinkLog.txt
+JLinkSettings.ini
+DebugConfig/
+Listings/
+Objects/
+F407/WLG_system/Drivers/CMSIS/DSP/Examples/**/RTE/
+EventRecorderStub.scvd
+
+# STM32CubeIDE / editor local files
+.settings/
+.project
+.cproject
+.mxproject
+.vscode/
+.idea/
+*.user
+*.suo
+*.tmp
+*.log
+
+# OS metadata
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local backup of pre-existing nested Git metadata
+.git-metadata-backup-*/
